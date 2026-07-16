@@ -1,2 +1,0 @@
-# deriv-proxy
-deriv-proxy
