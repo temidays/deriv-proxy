@@ -1,4 +1,7 @@
+import codecs
 import encodings.idna
+
+codecs.register(encodings.idna.search_function)
 
 from flask import Flask, request, jsonify
 import websocket, json, os, time, sqlite3, threading, urllib.request, urllib.parse
@@ -459,12 +462,12 @@ def stop_scanner():
 # ==========================================================
 @app.route("/")
 def home():
-    return "Freedom Structure Scanner V3 is running ✅"
+   return "Freedom Structure Scanner V4 is running ✅"
 
 @app.route("/health")
 def health():
     return jsonify({
-        "ok": True, "engine": "Freedom Structure Scanner V3",
+        "ok": True, "engine": "Freedom Structure Scanner V4",
         "memory": True, "chronological_locking": True,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
         "continuous_scanner": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive()) and not SCANNER_STOP.is_set(),
