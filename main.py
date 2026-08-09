@@ -21,6 +21,10 @@ SYMBOL_MAP = {
     "CRASH500": "CRASH500", "CRASH1000": "CRASH1000",
 }
 DB_LOCK = threading.Lock()
+SCAN_LOCK = threading.Lock()
+SCANNER_THREAD = None
+SCANNER_STOP = threading.Event()
+SCANNER_LAST = {}
 
 # ==========================================================
 # DATABASE / MEMORY
@@ -149,6 +153,12 @@ def normalize(rows):
         "epoch": int(x.get("epoch", 0)), "open": float(x["open"]), "high": float(x["high"]),
         "low": float(x["low"]), "close": float(x["close"]), "volume": float(x.get("volume", 0))
     } for x in rows]
+
+
+def closed_candles(rows, granularity):
+    """Return only fully closed candles. The currently forming candle is ignored."""
+    now = int(time.time())
+    return [x for x in rows if x["epoch"] + int(granularity) <= now]
 
 # ==========================================================
 # STRUCTURE TOOLS
@@ -360,6 +370,89 @@ def run_scan(pair, tf, cs, strength, bos, min_atr, exp_atr, disp_atr):
     }
 
 # ==========================================================
+# CONTINUOUS LIVE SCANNER
+# ==========================================================
+def env_list(name, default):
+    raw = os.environ.get(name, default)
+    return [x.strip().upper() for x in raw.split(",") if x.strip()]
+
+
+def scanner_settings():
+    pairs = env_list("SCANNER_PAIRS", "VOLATILITY100")
+    tfs = [x for x in env_list("SCANNER_TIMEFRAMES", "M15") if x in TIMEFRAME_MAP]
+    return {
+        "enabled": os.environ.get("SCANNER_ENABLED", "true").lower() in ("1", "true", "yes", "on"),
+        "pairs": pairs,
+        "timeframes": tfs or ["M15"],
+        "interval": max(5, int(os.environ.get("SCANNER_INTERVAL_SECONDS", "10"))),
+        "count": max(100, min(1000, int(os.environ.get("SCANNER_CANDLE_COUNT", "500")))),
+        "strength": int(os.environ.get("SCANNER_STRENGTH", "3")),
+        "bos": os.environ.get("SCANNER_BOS", "body").lower(),
+        "min_atr": float(os.environ.get("SCANNER_MIN_ATR_MOVE", ".25")),
+        "exp_atr": float(os.environ.get("SCANNER_MIN_EXPANSION_ATR", ".5")),
+        "disp_atr": float(os.environ.get("SCANNER_DISPLACEMENT_ATR", "1.0")),
+    }
+
+
+def continuous_scan_once(pair, tf, cfg):
+    gran = TIMEFRAME_MAP[tf]
+    cs = closed_candles(normalize(get_candles(SYMBOL_MAP.get(pair, pair), gran, cfg["count"])), gran)
+    if len(cs) < max(50, cfg["strength"] * 4):
+        return {"ok": False, "reason": "not_enough_closed_candles", "pair": pair, "timeframe": tf}
+    latest = cs[-1]["epoch"]
+    cache_key = f"{pair}|{tf}"
+    # A structure only changes when a new closed candle arrives. This prevents
+    # hammering the engine and avoids duplicate Telegram sends.
+    if SCANNER_LAST.get(cache_key) == latest:
+        return {"ok": True, "pair": pair, "timeframe": tf, "skipped": True, "latest_closed_epoch": latest}
+    result = run_scan(pair, tf, cs, cfg["strength"], cfg["bos"], cfg["min_atr"], cfg["exp_atr"], cfg["disp_atr"])
+    SCANNER_LAST[cache_key] = latest
+    return {"ok": True, "pair": pair, "timeframe": tf, "skipped": False, "latest_closed_epoch": latest,
+            "completed_now": result["completed_now"], "active_structures": result["active_structures"]}
+
+
+def scanner_loop():
+    print("[Scanner] Continuous live scanner started")
+    while not SCANNER_STOP.is_set():
+        try:
+            cfg = scanner_settings()
+            if cfg["enabled"]:
+                # One worker thread owns live scanning, so Telegram alerts cannot
+                # be duplicated by multiple concurrent scan requests.
+                if SCAN_LOCK.acquire(blocking=False):
+                    try:
+                        for pair in cfg["pairs"]:
+                            for tf in cfg["timeframes"]:
+                                if SCANNER_STOP.is_set(): break
+                                try:
+                                    r = continuous_scan_once(pair, tf, cfg)
+                                    if r.get("completed_now"):
+                                        print(f"[Scanner] {pair} {tf}: {r['completed_now']} new A→F signal(s)")
+                                except Exception as e:
+                                    print(f"[Scanner] {pair} {tf} error: {e}")
+                    finally:
+                        SCAN_LOCK.release()
+        except Exception as e:
+            print("[Scanner] loop error:", e)
+        SCANNER_STOP.wait(cfg.get("interval", 10) if 'cfg' in locals() else 10)
+    print("[Scanner] Continuous live scanner stopped")
+
+
+def start_scanner():
+    global SCANNER_THREAD
+    if SCANNER_THREAD and SCANNER_THREAD.is_alive():
+        return False
+    SCANNER_STOP.clear()
+    SCANNER_THREAD = threading.Thread(target=scanner_loop, name="freedom-live-scanner", daemon=True)
+    SCANNER_THREAD.start()
+    return True
+
+
+def stop_scanner():
+    SCANNER_STOP.set()
+    return True
+
+# ==========================================================
 # API
 # ==========================================================
 @app.route("/")
@@ -372,6 +465,9 @@ def health():
         "ok": True, "engine": "Freedom Structure Scanner V3",
         "memory": True, "chronological_locking": True,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
+        "continuous_scanner": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive()) and not SCANNER_STOP.is_set(),
+        "scanner_pairs": scanner_settings()["pairs"],
+        "scanner_timeframes": scanner_settings()["timeframes"],
         "timeframes": list(TIMEFRAME_MAP)
     })
 
@@ -380,7 +476,7 @@ def ohlc():
     pair = request.args.get("pair", "").upper(); tf = request.args.get("timeframe", "M15").upper()
     count = int(request.args.get("count", 500))
     if tf not in TIMEFRAME_MAP: return jsonify({"error": "Unsupported timeframe", "supported": list(TIMEFRAME_MAP)}), 400
-    return jsonify(normalize(get_candles(SYMBOL_MAP.get(pair, pair), TIMEFRAME_MAP[tf], count)))
+    return jsonify(closed_candles(normalize(get_candles(SYMBOL_MAP.get(pair, pair), TIMEFRAME_MAP[tf], count)), TIMEFRAME_MAP[tf]))
 
 @app.route("/scan")
 def scan():
@@ -389,9 +485,36 @@ def scan():
     bos = request.args.get("bos", "body").lower(); bos = bos if bos in ("body", "wick") else "body"
     min_atr = float(request.args.get("min_atr_move", .25)); exp_atr = float(request.args.get("min_expansion_atr", .5)); disp_atr = float(request.args.get("displacement_atr", 1.0))
     if tf not in TIMEFRAME_MAP: return jsonify({"error": "Unsupported timeframe", "supported": list(TIMEFRAME_MAP)}), 400
-    cs = normalize(get_candles(SYMBOL_MAP.get(pair, pair), TIMEFRAME_MAP[tf], count))
+    cs = closed_candles(normalize(get_candles(SYMBOL_MAP.get(pair, pair), TIMEFRAME_MAP[tf], count)), TIMEFRAME_MAP[tf])
     if len(cs) < max(50, strength * 4): return jsonify({"error": "Not enough candles returned", "candles": len(cs)}), 502
     return jsonify(run_scan(pair, tf, cs, strength, bos, min_atr, exp_atr, disp_atr))
+
+@app.route("/scanner/status")
+def scanner_status():
+    cfg = scanner_settings()
+    return jsonify({
+        "running": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive()) and not SCANNER_STOP.is_set(),
+        "enabled": cfg["enabled"], "pairs": cfg["pairs"], "timeframes": cfg["timeframes"],
+        "interval_seconds": cfg["interval"], "candle_count": cfg["count"],
+        "last_processed": SCANNER_LAST
+    })
+
+
+@app.route("/scanner/start", methods=["POST"])
+def scanner_start():
+    if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    start_scanner()
+    return jsonify({"ok": True, "message": "Continuous scanner started"})
+
+
+@app.route("/scanner/stop", methods=["POST"])
+def scanner_stop():
+    if not ADMIN_KEY or request.headers.get("X-Admin-Key") != ADMIN_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    stop_scanner()
+    return jsonify({"ok": True, "message": "Continuous scanner stopping"})
+
 
 @app.route("/structures")
 def structures():
@@ -444,6 +567,11 @@ def reset():
             c.execute("DELETE FROM structures")
         c.commit(); c.close()
     return jsonify({"ok": True, "message": "Structure memory reset"})
+
+# Start once when the Gunicorn worker imports the application.
+# Render should run a single web worker for this in-process scanner.
+if os.environ.get("SCANNER_ENABLED", "true").lower() in ("1", "true", "yes", "on"):
+    start_scanner()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
