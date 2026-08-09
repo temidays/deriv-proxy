@@ -415,6 +415,9 @@ def scanner_settings():
 
 
 def continuous_scan_once(pair, tf, cfg):
+    cache_key = f"{pair}|{tf}"
+
+SCANNER_DIAGNOSTICS["last_check"][cache_key] = int(time.time())
     gran = TIMEFRAME_MAP[tf]
     cs = closed_candles(normalize(get_candles(SYMBOL_MAP.get(pair, pair), gran, cfg["count"])), gran)
     if len(cs) < max(50, cfg["strength"] * 4):
@@ -448,8 +451,15 @@ def scanner_loop():
                                     r = continuous_scan_once(pair, tf, cfg)
                                     if r.get("completed_now"):
                                         print(f"[Scanner] {pair} {tf}: {r['completed_now']} new A→F signal(s)")
-                                except Exception as e:
-                                    print(f"[Scanner] {pair} {tf} error: {e}")
+except Exception as e:
+    cache_key = f"{pair}|{tf}"
+
+    SCANNER_DIAGNOSTICS["last_error"][cache_key] = {
+        "time": int(time.time()),
+        "error": str(e)
+    }
+
+    print(f"[Scanner] {pair} {tf} error: {e}")
                     finally:
                         SCAN_LOCK.release()
         except Exception as e:
@@ -517,8 +527,17 @@ def scanner_status():
         "enabled": cfg["enabled"], "pairs": cfg["pairs"], "timeframes": cfg["timeframes"],
         "interval_seconds": cfg["interval"], "candle_count": cfg["count"],
         "last_processed": SCANNER_LAST
+        "diagnostics": SCANNER_DIAGNOSTICS
     })
 
+SCANNER_LAST = {}
+
+SCANNER_DIAGNOSTICS = {
+    "last_check": {},
+    "last_success": {},
+    "last_error": {},
+    "scan_count": {}
+}
 
 @app.route("/scanner/start", methods=["POST"])
 def scanner_start():
@@ -535,6 +554,12 @@ def scanner_stop():
     stop_scanner()
     return jsonify({"ok": True, "message": "Continuous scanner stopping"})
 
+SCANNER_DIAGNOSTICS["last_success"][cache_key] = int(time.time())
+SCANNER_DIAGNOSTICS["scan_count"][cache_key] = (
+    SCANNER_DIAGNOSTICS["scan_count"].get(cache_key, 0) + 1
+)
+
+SCANNER_DIAGNOSTICS["last_error"].pop(cache_key, None)
 
 @app.route("/structures")
 def structures():
