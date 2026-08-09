@@ -1,8 +1,3 @@
-import codecs
-import encodings.idna
-
-codecs.register(encodings.idna.search_function)
-
 from flask import Flask, request, jsonify
 import websocket, json, os, time, sqlite3, threading, urllib.request, urllib.parse
 
