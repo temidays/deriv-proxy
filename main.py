@@ -1,3 +1,5 @@
+import encodings.idna
+
 from flask import Flask, request, jsonify
 import websocket, json, os, time, sqlite3, threading, urllib.request, urllib.parse
 
