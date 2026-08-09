@@ -1,5 +1,25 @@
+import codecs
+import encodings
+
+# Restore/register Python's standard codec search function.
+codecs.register(encodings.search_function)
+
 from flask import Flask, request, jsonify
-import websocket, json, os, time, sqlite3, threading, urllib.request, urllib.parse
+import websocket
+import json
+import os
+import time
+import sqlite3
+import threading
+import urllib.request
+import urllib.parse
+
+# Verify the standard IDNA codec.
+try:
+    codecs.lookup("idna")
+    print("[Startup] IDNA codec: OK")
+except LookupError as e:
+    print(f"[Startup] IDNA codec ERROR: {e}")
 
 app = Flask(__name__)
 
