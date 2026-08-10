@@ -225,40 +225,6 @@ def row_to_s(r):
     }
 
 
-@app.route("/structures")
-def structures():
-    pair_param = request.args.get("pair")
-    tf_param = request.args.get("timeframe")
-
-    sql = "SELECT * FROM structures WHERE state != 'DISCARDED'"
-    args = []
-    where_clauses = []
-
-    if pair_param:
-        pairs = [p.strip().upper() for p in pair_param.split(',')]
-        placeholders = ','.join(['?'] * len(pairs))
-        where_clauses.append(f"pair IN ({placeholders})")
-        args.extend(pairs)
-
-    if tf_param:
-        tfs = [t.strip().upper() for t in tf_param.split(',')]
-        placeholders = ','.join(['?'] * len(tfs))
-        where_clauses.append(f"timeframe IN ({placeholders})")
-        args.extend(tfs)
-
-    if where_clauses:
-        sql += " AND " + " AND ".join(where_clauses)
-
-    sql += " ORDER BY updated_epoch DESC LIMIT 500"
-
-    with DB_LOCK:
-        c = db()
-        rows = c.execute(sql, args).fetchall()
-        c.close()
-
-    return jsonify([row_to_s(r) for r in rows])
-
-
 # ============================================================
 # DERIV DATA
 # ============================================================
