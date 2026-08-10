@@ -167,15 +167,18 @@ def fib50(b_price, e_price, direction):
 def save(s):
     now = int(time.time())
     k = structure_key(s)
+
     with DB_LOCK:
         c = db()
-        c.execute("""
+        c.execute(
+            """
             INSERT INTO structures(
                 structure_key, pair, timeframe, direction, state,
                 a_json, b_json, c_json, d_json, e_json, f_json,
                 fib50, valid, telegram_sent, discard_reason,
                 created_epoch, updated_epoch, live_from_epoch
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(structure_key) DO UPDATE SET
                 state=excluded.state,
                 d_json=excluded.d_json,
@@ -187,17 +190,31 @@ def save(s):
                 discard_reason=excluded.discard_reason,
                 updated_epoch=excluded.updated_epoch,
                 live_from_epoch=excluded.live_from_epoch
-        """, (
-            k, s["pair"], s["timeframe"], s["direction"], s["state"],
-            j(s.get("a")), j(s.get("b")), j(s.get("c")), j(s.get("d")), j(s.get("e")), j(s.get("f")),
-            s.get("fib50"), int(bool(s.get("valid"))), int(bool(s.get("telegram_sent"))),
-            s.get("discard_reason", ""),
-            s.get("created_epoch", s["a"]["epoch"] if s.get("a") else now),
-            now,
-            int(s.get("live_from_epoch", 0))
-        ))
+            """,
+            (
+                k,
+                s["pair"],
+                s["timeframe"],
+                s["direction"],
+                s["state"],
+                j(s.get("a")),
+                j(s.get("b")),
+                j(s.get("c")),
+                j(s.get("d")),
+                j(s.get("e")),
+                j(s.get("f")),
+                s.get("fib50"),
+                int(bool(s.get("valid"))),
+                int(bool(s.get("telegram_sent"))),
+                s.get("discard_reason", ""),
+                s.get("created_epoch", s["a"]["epoch"] if s.get("a") else now),
+                now,
+                int(s.get("live_from_epoch", 0))
+            )
+        )
         c.commit()
         c.close()
+
     return k
 
 
