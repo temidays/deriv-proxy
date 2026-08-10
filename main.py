@@ -3295,7 +3295,30 @@ def telegram_register_api():
         }
     )
 
+@app.route("/telegram/test", methods=["POST"])
+def telegram_test():
+    d = request.get_json(force=True, silent=True) or {}
+    chat = d.get("chat_id")
 
+    if chat is None:
+        return jsonify({"error": "chat_id required"}), 400
+
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({
+            "ok": False,
+            "error": "TELEGRAM_BOT_TOKEN not set on server"
+        }), 500
+
+    text = (
+        "✅ TradeSignal test message\n\n"
+        "Your Telegram alerts are working.\n"
+        "You will receive A→F structure signals here."
+    )
+
+    sent = tg_send(str(chat), text)
+
+    return jsonify({"ok": bool(sent), "chat_id": str(chat)})
+    
 @app.post("/telegram/unregister")
 def telegram_unregister_api():
     body = request.get_json(
