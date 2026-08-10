@@ -1092,88 +1092,203 @@ def scanner_stop():
 def structures():
     pair = request.args.get("pair")
     tf = request.args.get("timeframe")
+
     sql = "SELECT * FROM structures"
     args = []
     where = []
+
     if pair:
         where.append("pair=?")
         args.append(pair.upper())
+
     if tf:
         where.append("timeframe=?")
         args.append(tf.upper())
+
     if where:
         sql += " WHERE " + " AND ".join(where)
+
     sql += " ORDER BY updated_epoch DESC LIMIT 300"
+
     with DB_LOCK:
         c = db()
         rows = c.execute(sql, args).fetchall()
         c.close()
+
     return jsonify([row_to_s(r) for r in rows])
+
 
 @app.route("/telegram/register", methods=["POST"])
 def register():
     d = request.get_json(force=True, silent=True) or {}
     chat = d.get("chat_id")
+
     if chat is None:
         return jsonify({"error": "chat_id required"}), 400
+
     with DB_LOCK:
         c = db()
+
         c.execute("""
-            INSERT INTO telegram_users(chat_id, username, active, created_epoch)
+            INSERT INTO telegram_users(
+                chat_id,
+                username,
+                active,
+                created_epoch
+            )
             VALUES(?,?,1,?)
-            ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, active=1
-        """, (str(chat), d.get("username", ""), int(time.time())))
+            ON CONFLICT(chat_id)
+            DO UPDATE SET
+                username=excluded.username,
+                active=1
+            """,
+            (
+                str(chat),
+                d.get("username", ""),
+                int(time.time()),
+            ),
+        )
+
         c.commit()
         c.close()
-    return jsonify({"ok": True, "chat_id": str(chat)})
+
+    return jsonify({
+        "ok": True,
+        "chat_id": str(chat),
+    })
+
 
 @app.route("/telegram/users")
 def users():
     if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
         return jsonify({"error": "unauthorized"}), 401
+
     with DB_LOCK:
         c = db()
-        rows = c.execute("SELECT chat_id, username, active, created_epoch FROM telegram_users ORDER BY created_epoch DESC").fetchall()
+
+        rows = c.execute("""
+            SELECT
+                chat_id,
+                username,
+                active,
+                created_epoch
+            FROM telegram_users
+            ORDER BY created_epoch DESC
+            """
+        ).fetchall()
+
         c.close()
+
     return jsonify([dict(r) for r in rows])
+
 
 @app.route("/telegram/broadcast", methods=["POST"])
 def broadcast():
     if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
         return jsonify({"error": "unauthorized"}), 401
+
     body = request.get_json(force=True, silent=True) or {}
+
     text = body.get("text", "")
+
     with DB_LOCK:
         c = db()
-        users = c.execute("SELECT chat_id FROM telegram_users WHERE active=1").fetchall()
+
+        users = c.execute("""
+            SELECT chat_id
+            FROM telegram_users
+            WHERE active=1
+            """
+        ).fetchall()
+
         c.close()
-    sent = sum(1 for u in users if tg_send(u["chat_id"], text))
-    return jsonify({"targeted": len(users), "sent": sent})
+
+    sent = sum(
+        1
+        for u in users
+        if tg_send(
+            u["chat_id"],
+            text,
+        )
+    )
+
+    return jsonify({
+        "targeted": len(users),
+        "sent": sent,
+    })
+
 
 @app.route("/admin/reset", methods=["POST"])
 def reset():
-    if not ADMIN_KEY or request.headers.get("X-Admin-Key") != ADMIN_KEY:
+    if ADMIN_KEY and request.headers.get("X-Admin-Key") != ADMIN_KEY:
         return jsonify({"error": "unauthorized"}), 401
+
     pair = request.args.get("pair")
     tf = request.args.get("timeframe")
+
     with DB_LOCK:
         c = db()
+
         if pair and tf:
-            c.execute("DELETE FROM structures WHERE pair=? AND timeframe=?", (pair.upper(), tf.upper()))
+            c.execute(
+                """
+                DELETE FROM structures
+                WHERE pair=? AND timeframe=?
+                """,
+                (
+                    pair.upper(),
+                    tf.upper(),
+                ),
+            )
+
         elif pair:
-            c.execute("DELETE FROM structures WHERE pair=?", (pair.upper(),))
+            c.execute(
+                """
+                DELETE FROM structures
+                WHERE pair=?
+                """,
+                (pair.upper(),),
+            )
+
         else:
-            c.execute("DELETE FROM structures")
+            c.execute(
+                "DELETE FROM structures"
+            )
+
         c.commit()
         c.close()
-    return jsonify({"ok": True, "message": "Memory reset"})
+
+    return jsonify({
+        "ok": True,
+        "message": "Structure memory reset",
+    })
+
 
 # ============================================================
 # AUTO START
 # ============================================================
 
-if os.environ.get("SCANNER_ENABLED", "true").lower() in ("1", "true", "yes", "on"):
+if (
+    os.environ.get(
+        "SCANNER_ENABLED",
+        "true",
+    ).lower()
+    in ("1", "true", "yes", "on")
+):
     start_scanner()
 
+
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.environ.get(
+                "PORT",
+                8080,
+            )
+        ),
+    )
