@@ -179,6 +179,17 @@ def db():
         )
     """)
 
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS scanner_targets(
+            pair TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            active INTEGER DEFAULT 1,
+            created_epoch INTEGER,
+            updated_epoch INTEGER,
+            PRIMARY KEY(pair, timeframe)
+        )
+    """)
+
     columns = {
         row[1]
         for row in connection.execute("PRAGMA table_info(structures)").fetchall()
