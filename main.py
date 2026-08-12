@@ -90,6 +90,7 @@ SYMBOL_MAP = {
     "GBPJPY": "frxGBPJPY",
     "EURJPY": "frxEURJPY",
     "AUDJPY": "frxAUDJPY",
+    "XAUUSD": "frxXAUUSD",
     "FRXEURUSD": "frxEURUSD",
     "FRXGBPUSD": "frxGBPUSD",
     "FRXUSDJPY": "frxUSDJPY",
@@ -101,6 +102,7 @@ SYMBOL_MAP = {
     "FRXGBPJPY": "frxGBPJPY",
     "FRXEURJPY": "frxEURJPY",
     "FRXAUDJPY": "frxAUDJPY",
+    "FRXXAUUSD": "frxXAUUSD",
 }
 
 DB_LOCK = threading.RLock()
