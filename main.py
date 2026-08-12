@@ -51,8 +51,10 @@ TIMEFRAME_MAP = {
     "M15": 900,
     "M30": 1800,
     "H1": 3600,
+    "H2": 7200,
     "H4": 14400,
-    "D1": 86400,
+    "H8": 28800,
+    "H24": 86400,
 }
 
 # Curated set of supported symbols.
