@@ -37,6 +37,9 @@ DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "YOUR_APP_ID_HERE")
 DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+
+# Persistent disk path on Render.
+# Set DB_PATH=/var/data/structure_memory.db in Render environment
 DB_PATH = os.environ.get("DB_PATH", "structure_memory.db")
 
 DEFAULT_SCANNER_INTERVAL = 120
@@ -52,7 +55,9 @@ TIMEFRAME_MAP = {
     "D1": 86400,
 }
 
+# Curated set of supported symbols.
 SYMBOL_MAP = {
+    # Volatility indices (Deriv native)
     "R_10": "R_10",
     "R_25": "R_25",
     "R_50": "R_50",
@@ -68,21 +73,34 @@ SYMBOL_MAP = {
     "VOLATILITY50": "R_50",
     "VOLATILITY75": "R_75",
     "VOLATILITY100": "R_100",
+    # Boom / Crash
     "BOOM500": "BOOM500",
     "BOOM1000": "BOOM1000",
     "CRASH500": "CRASH500",
     "CRASH1000": "CRASH1000",
+    # Forex
     "EURUSD": "frxEURUSD",
     "GBPUSD": "frxGBPUSD",
     "USDJPY": "frxUSDJPY",
     "AUDUSD": "frxAUDUSD",
     "USDCAD": "frxUSDCAD",
+    "USDCHF": "frxUSDCHF",
+    "NZDUSD": "frxNZDUSD",
     "EURGBP": "frxEURGBP",
     "GBPJPY": "frxGBPJPY",
     "EURJPY": "frxEURJPY",
+    "AUDJPY": "frxAUDJPY",
     "FRXEURUSD": "frxEURUSD",
     "FRXGBPUSD": "frxGBPUSD",
     "FRXUSDJPY": "frxUSDJPY",
+    "FRXAUDUSD": "frxAUDUSD",
+    "FRXUSDCAD": "frxUSDCAD",
+    "FRXUSDCHF": "frxUSDCHF",
+    "FRXNZDUSD": "frxNZDUSD",
+    "FRXEURGBP": "frxEURGBP",
+    "FRXGBPJPY": "frxGBPJPY",
+    "FRXEURJPY": "frxEURJPY",
+    "FRXAUDJPY": "frxAUDJPY",
 }
 
 DB_LOCK = threading.RLock()
@@ -97,25 +115,51 @@ SCANNER_DIAGNOSTICS = {
     "scan_count": {},
 }
 
+
 # ============================================================
 # SYMBOL HELPERS
 # ============================================================
 
 def canonical_symbol(value):
+    """
+    Map user input to a supported Deriv symbol.
+
+    Reject anything that is not in SYMBOL_MAP.
+    """
     if value is None:
         return ""
+
     raw = str(value).strip()
     if not raw:
         return ""
+
     upper = raw.upper().strip()
-    compact = upper.replace(" ", "").replace("/", "").replace("-", "")
+
+    compact = (
+        upper
+        .replace(" ", "")
+        .replace("/", "")
+        .replace("-", "")
+        .replace("_INDEX", "")
+    )
+
     if upper in SYMBOL_MAP:
         return SYMBOL_MAP[upper]
+
     if compact in SYMBOL_MAP:
         return SYMBOL_MAP[compact]
+
     if compact.startswith("FRX") and len(compact) > 3:
-        return "frx" + compact[3:]
-    return upper
+        candidate = "frx" + compact[3:]
+        if candidate in SYMBOL_MAP.values():
+            return candidate
+
+    return ""
+
+
+def is_supported_symbol(value):
+    return canonical_symbol(value) != ""
+
 
 def unique_values(values):
     output = []
@@ -126,6 +170,7 @@ def unique_values(values):
             output.append(value)
     return output
 
+
 # ============================================================
 # DATABASE
 # ============================================================
@@ -134,19 +179,65 @@ def ensure_database_directory():
     absolute = os.path.abspath(DB_PATH)
     directory = os.path.dirname(absolute)
     if directory and not os.path.exists(directory):
-        os.makedirs(directory, exist_ok=True)
+        try:
+            os.makedirs(directory, exist_ok=True)
+            print(f"[DB] Created directory: {directory}")
+        except Exception as exc:
+            print(f"[DB] Could not create directory: {exc}")
 
-def db():
-    ensure_database_directory()
-    connection = sqlite3.connect(DB_PATH, timeout=30)
-    connection.row_factory = sqlite3.Row
+
+def is_database_corrupt():
+    """
+    Quick corruption check.
+
+    Returns True if the database is malformed.
+    """
+    if not os.path.exists(DB_PATH):
+        return False
+
     try:
-        connection.execute("PRAGMA busy_timeout=30000")
-        connection.execute("PRAGMA journal_mode=WAL")
+        check = sqlite3.connect(DB_PATH, timeout=5)
+        check.row_factory = None
+        check.execute("PRAGMA quick_check")
+        check.close()
+        return False
     except sqlite3.DatabaseError:
-        pass
+        return True
+    except Exception:
+        return False
 
-    connection.execute("""
+
+def quarantine_corrupt_database():
+    """
+    Rename a corrupt database file so a fresh one can be created.
+    """
+    if not os.path.exists(DB_PATH):
+        return
+
+    corrupt_path = f"{DB_PATH}.corrupt.{int(time.time())}"
+
+    for suffix in ("", "-wal", "-shm"):
+        source = f"{DB_PATH}{suffix}"
+        destination = f"{corrupt_path}{suffix}"
+
+        if os.path.exists(source):
+            try:
+                os.rename(source, destination)
+                print(f"[DB] Quarantined: {source} -> {destination}")
+            except Exception as exc:
+                print(f"[DB] Could not move {source}: {exc}")
+                try:
+                    os.remove(source)
+                except Exception:
+                    pass
+
+
+def create_schema(connection):
+    """
+    Create all tables and indexes. Idempotent.
+    """
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS structures(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             structure_key TEXT UNIQUE NOT NULL,
@@ -168,18 +259,22 @@ def db():
             live_from_epoch INTEGER DEFAULT 0,
             discard_reason TEXT DEFAULT ''
         )
-    """)
+        """
+    )
 
-    connection.execute("""
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS telegram_users(
             chat_id TEXT PRIMARY KEY,
-            username TEXT,
+            username TEXT DEFAULT '',
             active INTEGER DEFAULT 1,
             created_epoch INTEGER
         )
-    """)
+        """
+    )
 
-    connection.execute("""
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS scanner_targets(
             pair TEXT NOT NULL,
             timeframe TEXT NOT NULL,
@@ -188,26 +283,90 @@ def db():
             updated_epoch INTEGER,
             PRIMARY KEY(pair, timeframe)
         )
-    """)
+        """
+    )
 
-    columns = {
-        row[1]
-        for row in connection.execute("PRAGMA table_info(structures)").fetchall()
-    }
+    # Migrate old schemas
+    try:
+        existing_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(structures)"
+            ).fetchall()
+        }
 
-    if "live_from_epoch" not in columns:
-        connection.execute("ALTER TABLE structures ADD COLUMN live_from_epoch INTEGER DEFAULT 0")
-    if "discard_reason" not in columns:
-        connection.execute("ALTER TABLE structures ADD COLUMN discard_reason TEXT DEFAULT ''")
+        if "live_from_epoch" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE structures ADD COLUMN live_from_epoch INTEGER DEFAULT 0"
+            )
 
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_structures_pair_timeframe ON structures(pair, timeframe)")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_structures_state ON structures(state)")
+        if "discard_reason" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE structures ADD COLUMN discard_reason TEXT DEFAULT ''"
+            )
+    except sqlite3.DatabaseError as exc:
+        print(f"[DB] Migration warning: {exc}")
+
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_structures_pair_timeframe ON structures(pair, timeframe)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_structures_state ON structures(state)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_structures_updated ON structures(updated_epoch)"
+    )
+
     connection.commit()
+
+
+def db():
+    """
+    Open (or create) the SQLite database with WAL mode.
+
+    Recovers automatically if the database is corrupt.
+    """
+    ensure_database_directory()
+
+    # Recovery: if database is corrupt, quarantine it and start fresh.
+    if is_database_corrupt():
+        print("[DB] Corruption detected. Recovering...")
+        quarantine_corrupt_database()
+
+    connection = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        check_same_thread=False,
+    )
+
+    connection.row_factory = sqlite3.Row
+
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.DatabaseError as exc:
+        print(f"[DB] PRAGMA warning: {exc}")
+
+    create_schema(connection)
+
     return connection
 
-with DB_LOCK:
-    startup_db = db()
-    startup_db.close()
+
+# ============================================================
+# TIME HELPERS
+# ============================================================
+
+def epoch_to_utc(epoch):
+    return datetime.fromtimestamp(
+        int(epoch), tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def now_utc_string():
+    return epoch_to_utc(int(time.time()))
+
 
 # ============================================================
 # STRUCTURE SERIALIZATION
@@ -217,6 +376,7 @@ def j(value):
     if value is None:
         return None
     return json.dumps(value, separators=(",", ":"))
+
 
 def point(label, role, candle, price):
     return {
@@ -230,6 +390,7 @@ def point(label, role, candle, price):
         "close": float(candle["close"]),
     }
 
+
 def structure_key(structure):
     return (
         f"{structure['pair']}|"
@@ -240,13 +401,16 @@ def structure_key(structure):
         f"{structure['b']['epoch']}"
     )
 
+
 def fibonacci_level(b_price, e_price, ratio=0.5):
     ratio = max(0.0, min(1.0, float(ratio)))
     return float(b_price + ((e_price - b_price) * ratio))
 
+
 def save(structure):
     now = int(time.time())
     key = structure_key(structure)
+
     values = {
         "structure_key": key,
         "pair": structure["pair"],
@@ -271,7 +435,8 @@ def save(structure):
     with DB_LOCK:
         connection = db()
         try:
-            connection.execute("""
+            connection.execute(
+                """
                 INSERT INTO structures(
                     structure_key, pair, timeframe, direction, state,
                     a_json, b_json, c_json, d_json, e_json, f_json,
@@ -294,7 +459,10 @@ def save(structure):
                     f_json=excluded.f_json,
                     fib50=excluded.fib50,
                     valid=excluded.valid,
-                    telegram_sent=CASE WHEN structures.telegram_sent=1 THEN 1 ELSE excluded.telegram_sent END,
+                    telegram_sent=CASE
+                        WHEN structures.telegram_sent=1 THEN 1
+                        ELSE excluded.telegram_sent
+                    END,
                     discard_reason=excluded.discard_reason,
                     updated_epoch=excluded.updated_epoch,
                     live_from_epoch=excluded.live_from_epoch
@@ -308,6 +476,7 @@ def save(structure):
         finally:
             connection.close()
     return key
+
 
 def row_to_s(row):
     def parse_point(column):
@@ -332,6 +501,8 @@ def row_to_s(row):
         "fib50": row["fib50"],
         "valid": bool(row["valid"]),
         "telegram_sent": bool(row["telegram_sent"]),
+        "created_epoch": int(row["created_epoch"] or 0),
+        "updated_epoch": int(row["updated_epoch"] or 0),
         "live_from_epoch": int(row["live_from_epoch"] or 0),
         "discard_reason": row["discard_reason"] or "",
     }
@@ -348,6 +519,7 @@ def row_to_s(row):
         structure["fib"] = None
     return structure
 
+
 def structures_for(pair, timeframe):
     canonical_pair = canonical_symbol(pair)
     canonical_tf = str(timeframe).upper()
@@ -362,6 +534,7 @@ def structures_for(pair, timeframe):
             connection.close()
     return [row_to_s(row) for row in rows]
 
+
 def delete_structure(structure):
     key = structure_key(structure)
     with DB_LOCK:
@@ -372,6 +545,63 @@ def delete_structure(structure):
         finally:
             connection.close()
 
+
+# ============================================================
+# SCANNER TARGET MEMORY
+# ============================================================
+
+def database_scanner_targets():
+    with DB_LOCK:
+        connection = db()
+        try:
+            rows = connection.execute(
+                "SELECT pair, timeframe FROM scanner_targets WHERE active=1 ORDER BY pair, timeframe"
+            ).fetchall()
+        finally:
+            connection.close()
+    return [{"pair": row["pair"], "timeframe": row["timeframe"]} for row in rows]
+
+
+def replace_scanner_targets(pairs, timeframes):
+    canonical_pairs = unique_values(
+        [canonical_symbol(p) for p in pairs if is_supported_symbol(p)]
+    )
+    canonical_timeframes = unique_values(
+        [tf.upper() for tf in timeframes if tf.upper() in TIMEFRAME_MAP]
+    )
+
+    if not canonical_pairs:
+        raise ValueError("At least one valid pair is required")
+    if not canonical_timeframes:
+        raise ValueError("At least one supported timeframe is required")
+
+    targets = [
+        {"pair": pair, "timeframe": tf}
+        for pair in canonical_pairs
+        for tf in canonical_timeframes
+    ]
+    if len(targets) > 50:
+        raise ValueError("Maximum 50 pair/timeframe combinations")
+
+    now = int(time.time())
+    with DB_LOCK:
+        connection = db()
+        try:
+            connection.execute("DELETE FROM scanner_targets")
+            for target in targets:
+                connection.execute(
+                    "INSERT INTO scanner_targets(pair, timeframe, active, created_epoch, updated_epoch) VALUES(?,?,1,?,?)",
+                    (target["pair"], target["timeframe"], now, now),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+    return targets
+
+
 # ============================================================
 # DERIV DATA
 # ============================================================
@@ -379,7 +609,7 @@ def delete_structure(structure):
 def get_candles(symbol, granularity, count=500):
     deriv_symbol = canonical_symbol(symbol)
     if not deriv_symbol:
-        raise ValueError("Symbol is required")
+        raise ValueError(f"Unsupported symbol: {symbol}")
 
     result = []
     error_message = None
@@ -442,13 +672,14 @@ def get_candles(symbol, granularity, count=500):
     if open_error[0]:
         error_message = open_error[0]
     if not completed and not result:
-        raise TimeoutError(f"Deriv candle request timed out for {deriv_symbol}")
+        raise TimeoutError(f"Deriv request timed out for {deriv_symbol}")
     if error_message:
         raise RuntimeError(f"Deriv error for {deriv_symbol}: {error_message}")
     if not result:
         raise RuntimeError(f"Deriv returned no candles for {deriv_symbol}")
 
     return sorted(result, key=lambda item: int(item.get("epoch", 0)))
+
 
 def normalize(rows):
     return [
@@ -463,12 +694,14 @@ def normalize(rows):
         for row in rows
     ]
 
+
 def closed_candles(rows, granularity):
     now = int(time.time())
     return [
         candle for candle in rows
         if candle["epoch"] + int(granularity) <= now
     ]
+
 
 # ============================================================
 # TECHNICAL TOOLS
@@ -477,6 +710,7 @@ def closed_candles(rows, granularity):
 def atrs(candles, period=14):
     if not candles:
         return []
+
     true_ranges = []
     for index, candle in enumerate(candles):
         if index == 0:
@@ -497,6 +731,7 @@ def atrs(candles, period=14):
         values = true_ranges[start:index + 1]
         output[index] = sum(values) / len(values)
     return output
+
 
 def swings(candles, strength=3):
     strength = max(1, int(strength))
@@ -519,10 +754,13 @@ def swings(candles, strength=3):
             output.append(("L", index, candle))
         if is_high:
             output.append(("H", index, candle))
+
     return sorted(output, key=lambda item: item[1])
+
 
 def pivot_price(kind, candle):
     return candle["low"] if kind == "L" else candle["high"]
+
 
 def significant_swings(candles, strength=3, min_atr_move=0.25):
     raw = swings(candles, strength)
@@ -553,6 +791,7 @@ def significant_swings(candles, strength=3, min_atr_move=0.25):
             continue
         reduced.append((kind, index, candle))
     return reduced
+
 
 # ============================================================
 # A -> C -> B DISCOVERY
@@ -608,9 +847,7 @@ def discover_abc(candles, pair, timeframe, direction, strength, min_atr, min_bar
             "a": point("A", "INITIAL_SWING", a_candle, a_price),
             "b": point("B", "STRUCTURAL_EXTREME", b_candle, b_price),
             "c": point("C", "PREVIOUS_STRUCTURE", c_candle, c_price),
-            "d": None,
-            "e": None,
-            "f": None,
+            "d": None, "e": None, "f": None,
             "fib50": None,
             "state": "WAITING_FOR_BOS",
             "valid": False,
@@ -620,6 +857,7 @@ def discover_abc(candles, pair, timeframe, direction, strength, min_atr, min_bar
         }
         output.append(structure)
     return output
+
 
 # ============================================================
 # STRUCTURE ADVANCEMENT
@@ -634,11 +872,13 @@ def candle_breaks_level(candle, level, direction, bos_mode="body"):
         return candle["low"] < level
     return candle["close"] < level
 
+
 def mark_discarded(structure, reason):
     structure["state"] = "DISCARDED"
     structure["valid"] = False
     structure["discard_reason"] = reason
     return structure
+
 
 def advance(structure, candles, bos_mode="body", expansion_atr=0.5, displacement_atr=1.0,
             allow_historical_f=False, swing_strength=3, min_atr_move=0.25, fib_ratio=0.5):
@@ -766,39 +1006,54 @@ def advance(structure, candles, bos_mode="body", expansion_atr=0.5, displacement
 
     return structure
 
+
 # ============================================================
 # TELEGRAM
 # ============================================================
 
 def tg_send(chat_id, text):
     if not TELEGRAM_BOT_TOKEN:
-        return False
+        return False, "TELEGRAM_BOT_TOKEN not configured"
+
     data = urllib.parse.urlencode({
         "chat_id": str(chat_id),
         "text": text,
         "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
     }).encode()
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     telegram_request = urllib.request.Request(url, data=data)
-    try:
-        urllib.request.urlopen(telegram_request, timeout=15).read()
-        return True
-    except Exception as exc:
-        print(f"[Telegram] {exc}")
-        return False
 
-def epoch_to_utc(epoch):
-    """Convert epoch to formatted UTC timestamp string."""
-    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        with urllib.request.urlopen(telegram_request, timeout=15) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+            payload = json.loads(body)
+            if not payload.get("ok"):
+                return False, payload.get("description", "Telegram API error")
+            return True, "ok"
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            payload = json.loads(detail)
+            return False, payload.get("description", f"HTTP {exc.code}")
+        except Exception:
+            return False, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, str(exc)
+
 
 def signal_text(structure):
     icon = "🟢" if structure["direction"] == "BULLISH" else "🔴"
+
     lines = [
-        f"{icon} {structure['direction']} A→F STRUCTURE CONFIRMED",
+        f"{icon} <b>{structure['direction']} A→F STRUCTURE CONFIRMED</b>",
         "",
-        f"Symbol: {structure['pair']}",
-        f"Timeframe: {structure['timeframe']}",
+        f"Symbol: <b>{structure['pair']}</b>",
+        f"Timeframe: <b>{structure['timeframe']}</b>",
+        f"Detected: <b>{now_utc_string()}</b>",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
         "",
     ]
 
@@ -806,11 +1061,10 @@ def signal_text(structure):
         point_value = structure.get(key)
         if not point_value:
             continue
-        point_time = epoch_to_utc(point_value["epoch"])
         lines.extend([
-            f"{point_value['label']} — {point_value['role']}",
+            f"<b>{point_value['label']}</b> — {point_value['role']}",
             f"Price: {point_value['price']}",
-            f"Time: {point_time}",
+            f"Candle time: {epoch_to_utc(point_value['epoch'])}",
             "",
         ])
 
@@ -822,9 +1076,10 @@ def signal_text(structure):
         "TP: Manual",
         "SL: Manual",
         "",
-        "Scanner confirmed structure. Does not execute trades.",
+        "Scanner confirmed the structure. It does not execute trades.",
     ])
     return "\n".join(lines)
+
 
 def alert(structure):
     key = structure_key(structure)
@@ -842,9 +1097,15 @@ def alert(structure):
         finally:
             connection.close()
 
+    if not users:
+        print("[Telegram] No active users registered")
+        return 0
+
+    message = signal_text(structure)
     sent = 0
     for user in users:
-        if tg_send(user["chat_id"], signal_text(structure)):
+        ok, _detail = tg_send(user["chat_id"], message)
+        if ok:
             sent += 1
 
     if sent:
@@ -860,6 +1121,7 @@ def alert(structure):
                 connection.close()
     return sent
 
+
 # ============================================================
 # DIAGNOSTICS
 # ============================================================
@@ -867,14 +1129,21 @@ def alert(structure):
 def diagnostic_key(pair, timeframe):
     return f"{canonical_symbol(pair)}|{str(timeframe).upper()}"
 
+
 def diagnostic_started(pair, timeframe):
     key = diagnostic_key(pair, timeframe)
-    SCANNER_DIAGNOSTICS["last_check"][key] = {"status": "started", "time": int(time.time())}
+    SCANNER_DIAGNOSTICS["last_check"][key] = {
+        "status": "started",
+        "time": int(time.time()),
+        "time_utc": now_utc_string(),
+    }
+
 
 def diagnostic_success(pair, timeframe, result):
     key = diagnostic_key(pair, timeframe)
     SCANNER_DIAGNOSTICS["last_success"][key] = {
         "time": int(time.time()),
+        "time_utc": now_utc_string(),
         "latest_closed_epoch": result.get("latest_closed_epoch"),
         "completed_now": result.get("completed_now", 0),
         "active_structures": result.get("active_structures", 0),
@@ -883,9 +1152,15 @@ def diagnostic_success(pair, timeframe, result):
     SCANNER_DIAGNOSTICS["scan_count"][key] = SCANNER_DIAGNOSTICS["scan_count"].get(key, 0) + 1
     SCANNER_DIAGNOSTICS["last_error"].pop(key, None)
 
+
 def diagnostic_error(pair, timeframe, error):
     key = diagnostic_key(pair, timeframe)
-    SCANNER_DIAGNOSTICS["last_error"][key] = {"time": int(time.time()), "error": str(error)}
+    SCANNER_DIAGNOSTICS["last_error"][key] = {
+        "time": int(time.time()),
+        "time_utc": now_utc_string(),
+        "error": str(error),
+    }
+
 
 # ============================================================
 # SCAN ENGINE
@@ -895,7 +1170,11 @@ def run_scan(pair, timeframe, candles, strength, bos_mode, min_atr, expansion_at
              displacement_atr, min_bars=1, fib_ratio=0.5):
 
     pair = canonical_symbol(pair)
+    if not pair:
+        raise ValueError("Unsupported pair")
+
     timeframe = str(timeframe).upper()
+
     latest_epoch = candles[-1]["epoch"]
     completed_now = []
 
@@ -984,6 +1263,7 @@ def run_scan(pair, timeframe, candles, strength, bos_mode, min_atr, expansion_at
         "completed_signals": completed_now,
     }
 
+
 # ============================================================
 # SCANNER SETTINGS
 # ============================================================
@@ -991,6 +1271,7 @@ def run_scan(pair, timeframe, candles, strength, bos_mode, min_atr, expansion_at
 def environment_list(name, default):
     raw = os.environ.get(name, default)
     return [v.strip() for v in raw.split(",") if v.strip()]
+
 
 def scanner_settings():
     environment_pairs = unique_values([
@@ -1019,6 +1300,7 @@ def scanner_settings():
         "fib_ratio": max(0.0, min(1.0, float(os.environ.get("SCANNER_FIB_THRESHOLD", "0.5")))),
     }
 
+
 def effective_scanner_targets(config=None):
     stored_targets = database_scanner_targets()
     if stored_targets:
@@ -1030,52 +1312,6 @@ def effective_scanner_targets(config=None):
         for tf in config["timeframes"]
     ]
 
-def database_scanner_targets():
-    with DB_LOCK:
-        connection = db()
-        try:
-            rows = connection.execute(
-                "SELECT pair, timeframe FROM scanner_targets WHERE active=1 ORDER BY pair, timeframe"
-            ).fetchall()
-        finally:
-            connection.close()
-    return [{"pair": row["pair"], "timeframe": row["timeframe"]} for row in rows]
-
-def replace_scanner_targets(pairs, timeframes):
-    canonical_pairs = unique_values([canonical_symbol(p) for p in pairs if canonical_symbol(p)])
-    canonical_timeframes = unique_values([
-        tf.upper() for tf in timeframes if tf.upper() in TIMEFRAME_MAP
-    ])
-    if not canonical_pairs:
-        raise ValueError("At least one valid pair is required")
-    if not canonical_timeframes:
-        raise ValueError("At least one supported timeframe is required")
-
-    targets = [
-        {"pair": pair, "timeframe": tf}
-        for pair in canonical_pairs
-        for tf in canonical_timeframes
-    ]
-    if len(targets) > 50:
-        raise ValueError("Maximum 50 pair/timeframe combinations")
-
-    now = int(time.time())
-    with DB_LOCK:
-        connection = db()
-        try:
-            connection.execute("DELETE FROM scanner_targets")
-            for target in targets:
-                connection.execute(
-                    "INSERT INTO scanner_targets(pair, timeframe, active, created_epoch, updated_epoch) VALUES(?,?,1,?,?)",
-                    (target["pair"], target["timeframe"], now, now)
-                )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-    return targets
 
 # ============================================================
 # CONTINUOUS SCANNER
@@ -1124,6 +1360,7 @@ def continuous_scan_once(pair, timeframe, config):
     diagnostic_success(pair, timeframe, result)
     return result
 
+
 def scanner_loop():
     initial_config = scanner_settings()
     print(f"[Scanner] Continuous live scanner started (interval={initial_config['interval']}s)")
@@ -1135,7 +1372,7 @@ def scanner_loop():
             if not config["enabled"]:
                 print("[Scanner] Disabled by SCANNER_ENABLED.")
             elif not SCAN_LOCK.acquire(blocking=False):
-                print("[Scanner] Previous scan cycle is still running; skipping.")
+                print("[Scanner] Previous cycle still running; skipping.")
             else:
                 try:
                     targets = effective_scanner_targets(config)
@@ -1166,6 +1403,7 @@ def scanner_loop():
 
     print("[Scanner] Continuous live scanner stopped.")
 
+
 def start_scanner():
     global SCANNER_THREAD
     if SCANNER_THREAD and SCANNER_THREAD.is_alive():
@@ -1175,9 +1413,11 @@ def start_scanner():
     SCANNER_THREAD.start()
     return True
 
+
 def stop_scanner():
     SCANNER_STOP.set()
     return True
+
 
 # ============================================================
 # ADMIN HELPERS
@@ -1188,8 +1428,12 @@ def optional_admin_authorized():
         return True
     return request.headers.get("X-Admin-Key") == ADMIN_KEY
 
+
 def strict_admin_authorized():
-    return bool(ADMIN_KEY and request.headers.get("X-Admin-Key") == ADMIN_KEY)
+    if not ADMIN_KEY:
+        return True
+    return request.headers.get("X-Admin-Key") == ADMIN_KEY
+
 
 # ============================================================
 # API ROUTES
@@ -1199,39 +1443,92 @@ def strict_admin_authorized():
 def home_api():
     return "Freedom Structure Scanner is running. Order: A → C → B → D → E → F ✅"
 
+
 @app.get("/health")
 def health_api():
     config = scanner_settings()
-    targets = effective_scanner_targets(config)
+    try:
+        targets = effective_scanner_targets(config)
+    except Exception:
+        targets = []
+
+    try:
+        with DB_LOCK:
+            connection = db()
+            try:
+                telegram_users = connection.execute(
+                    "SELECT COUNT(*) FROM telegram_users WHERE active=1"
+                ).fetchone()[0]
+                stored_structures = connection.execute(
+                    "SELECT COUNT(*) FROM structures"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+    except Exception as exc:
+        print(f"[Health] database read failed: {exc}")
+        telegram_users = 0
+        stored_structures = 0
+
     return jsonify({
         "ok": True,
-        "engine": "Freedom Structure Scanner V6",
+        "engine": "Freedom Structure Scanner V7",
+        "server_time_utc": now_utc_string(),
         "chronological_order": "A -> C -> B -> D -> E -> F",
         "memory_discard": True,
+        "database_path": os.path.abspath(DB_PATH),
+        "database_persistent": os.path.abspath(DB_PATH).startswith("/var/data"),
+        "stored_structures": stored_structures,
+        "telegram_users": telegram_users,
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
+        "admin_key_configured": bool(ADMIN_KEY),
         "continuous_scanner": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive() and not SCANNER_STOP.is_set()),
         "scanner_interval_seconds": config["interval"],
         "scanner_targets": targets,
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
     })
+
 
 @app.get("/symbols/resolve")
 def resolve_symbol_api():
     raw = request.args.get("pair", "")
-    return jsonify({"input": raw, "deriv_symbol": canonical_symbol(raw)})
+    resolved = canonical_symbol(raw)
+    return jsonify({
+        "input": raw,
+        "deriv_symbol": resolved,
+        "supported": bool(resolved),
+    })
+
+
+@app.get("/symbols")
+def list_symbols_api():
+    return jsonify({
+        "ok": True,
+        "symbols": sorted(set(SYMBOL_MAP.values())),
+    })
+
 
 @app.get("/ohlc")
 def ohlc_api():
     raw_pair = request.args.get("pair", "")
     pair = canonical_symbol(raw_pair)
     timeframe = request.args.get("timeframe", "M15").upper()
+
     if not pair:
-        return jsonify({"error": "pair is required"}), 400
+        return jsonify({
+            "error": f"Unsupported symbol: {raw_pair}",
+            "hint": "Use /symbols to see supported symbols"
+        }), 400
+
     if timeframe not in TIMEFRAME_MAP:
-        return jsonify({"error": "Unsupported timeframe", "supported": list(TIMEFRAME_MAP)}), 400
+        return jsonify({
+            "error": "Unsupported timeframe",
+            "supported": list(TIMEFRAME_MAP)
+        }), 400
+
     try:
         count = max(100, min(int(request.args.get("count", DEFAULT_CANDLE_COUNT)), 1000))
     except ValueError:
         return jsonify({"error": "Invalid count"}), 400
+
     try:
         rows = get_candles(pair, TIMEFRAME_MAP[timeframe], count)
         candles = closed_candles(normalize(rows), TIMEFRAME_MAP[timeframe])
@@ -1239,15 +1536,25 @@ def ohlc_api():
     except Exception as exc:
         return jsonify({"error": str(exc), "pair": pair, "timeframe": timeframe}), 502
 
+
 @app.get("/scan")
 def scan_api():
     raw_pair = request.args.get("pair", "")
     pair = canonical_symbol(raw_pair)
     timeframe = request.args.get("timeframe", "M15").upper()
+
     if not pair:
-        return jsonify({"error": "pair is required"}), 400
+        return jsonify({
+            "error": f"Unsupported symbol: {raw_pair}",
+            "hint": "Use /symbols to see supported symbols"
+        }), 400
+
     if timeframe not in TIMEFRAME_MAP:
-        return jsonify({"error": "Unsupported timeframe", "supported": list(TIMEFRAME_MAP)}), 400
+        return jsonify({
+            "error": "Unsupported timeframe",
+            "supported": list(TIMEFRAME_MAP)
+        }), 400
+
     try:
         count = max(100, min(int(request.args.get("count", DEFAULT_CANDLE_COUNT)), 1000))
         strength = max(1, int(request.args.get("strength", 3)))
@@ -1258,11 +1565,14 @@ def scan_api():
         fib_ratio = max(0.0, min(1.0, float(request.args.get("fib_threshold", 0.5))))
     except ValueError:
         return jsonify({"error": "Invalid numeric parameter"}), 400
+
     bos_mode = request.args.get("bos", "body").lower()
     if bos_mode not in ("body", "wick"):
         bos_mode = "body"
+
     if not SCAN_LOCK.acquire(blocking=False):
         return jsonify({"error": "Scanner is already processing another request"}), 409
+
     try:
         rows = get_candles(pair, TIMEFRAME_MAP[timeframe], count)
         candles = closed_candles(normalize(rows), TIMEFRAME_MAP[timeframe])
@@ -1280,22 +1590,31 @@ def scan_api():
     finally:
         SCAN_LOCK.release()
 
+
 @app.get("/structures")
 def structures_api():
     raw_pair = request.args.get("pair")
     timeframe = request.args.get("timeframe")
+
     sql = "SELECT * FROM structures"
     arguments = []
     where = []
+
     if raw_pair:
+        pair = canonical_symbol(raw_pair)
+        if not pair:
+            return jsonify({"error": f"Unsupported symbol: {raw_pair}"}), 400
         where.append("pair=?")
-        arguments.append(canonical_symbol(raw_pair))
+        arguments.append(pair)
+
     if timeframe:
         where.append("timeframe=?")
         arguments.append(timeframe.upper())
+
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY updated_epoch DESC LIMIT 300"
+
     with DB_LOCK:
         connection = db()
         try:
@@ -1303,6 +1622,7 @@ def structures_api():
         finally:
             connection.close()
     return jsonify([row_to_s(row) for row in rows])
+
 
 @app.route("/scanner/targets", methods=["GET", "PUT", "POST"])
 def scanner_targets_api():
@@ -1316,15 +1636,28 @@ def scanner_targets_api():
             "supported_timeframes": list(TIMEFRAME_MAP),
             "source": "database" if database_scanner_targets() else "environment",
         })
+
     if not optional_admin_authorized():
         return jsonify({"error": "unauthorized"}), 401
+
     body = request.get_json(force=True, silent=True) or {}
     pairs = body.get("pairs", [])
     timeframes = body.get("timeframes", [])
+
     if not isinstance(pairs, list):
         return jsonify({"error": "pairs must be a JSON list"}), 400
     if not isinstance(timeframes, list):
         return jsonify({"error": "timeframes must be a JSON list"}), 400
+
+    # Reject unsupported symbols
+    invalid = [p for p in pairs if not is_supported_symbol(p)]
+    if invalid:
+        return jsonify({
+            "error": "Unsupported symbols detected",
+            "invalid": invalid,
+            "supported": sorted(set(SYMBOL_MAP.values())),
+        }), 400
+
     try:
         targets = replace_scanner_targets(pairs, timeframes)
         return jsonify({
@@ -1335,12 +1668,14 @@ def scanner_targets_api():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
+
 @app.get("/scanner/status")
 def scanner_status_api():
     config = scanner_settings()
     return jsonify({
         "running": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive() and not SCANNER_STOP.is_set()),
         "enabled": config["enabled"],
+        "server_time_utc": now_utc_string(),
         "interval_seconds": config["interval"],
         "candle_count": config["count"],
         "targets": effective_scanner_targets(config),
@@ -1353,6 +1688,7 @@ def scanner_status_api():
         },
     })
 
+
 @app.post("/scanner/start")
 def scanner_start_api():
     if not optional_admin_authorized():
@@ -1363,12 +1699,14 @@ def scanner_start_api():
         "message": "Scanner started" if started else "Scanner already running",
     })
 
+
 @app.post("/scanner/stop")
 def scanner_stop_api():
     if not optional_admin_authorized():
         return jsonify({"error": "unauthorized"}), 401
     stop_scanner()
     return jsonify({"ok": True, "message": "Scanner is stopping"})
+
 
 # ============================================================
 # TELEGRAM ROUTES
@@ -1378,28 +1716,34 @@ def scanner_stop_api():
 def telegram_register_api():
     body = request.get_json(force=True, silent=True) or {}
     chat_id = body.get("chat_id")
-    if chat_id is None:
+    if not chat_id:
         return jsonify({"error": "chat_id required"}), 400
+    chat_id = str(chat_id).strip()
     with DB_LOCK:
         connection = db()
         try:
             connection.execute(
                 "INSERT INTO telegram_users(chat_id, username, active, created_epoch) VALUES(?,?,1,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, active=1",
-                (str(chat_id), body.get("username", ""), int(time.time()))
+                (chat_id, body.get("username", ""), int(time.time()))
             )
             connection.commit()
+            total = connection.execute(
+                "SELECT COUNT(*) FROM telegram_users WHERE active=1"
+            ).fetchone()[0]
         finally:
             connection.close()
+    print(f"[Telegram] Registered chat_id={chat_id}")
     return jsonify({
-        "ok": True, "chat_id": str(chat_id),
+        "ok": True, "chat_id": chat_id, "active_users": total,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
     })
+
 
 @app.post("/telegram/unregister")
 def telegram_unregister_api():
     body = request.get_json(force=True, silent=True) or {}
     chat_id = body.get("chat_id")
-    if chat_id is None:
+    if not chat_id:
         return jsonify({"error": "chat_id required"}), 400
     with DB_LOCK:
         connection = db()
@@ -1409,6 +1753,7 @@ def telegram_unregister_api():
         finally:
             connection.close()
     return jsonify({"ok": True, "chat_id": str(chat_id), "active": False})
+
 
 @app.get("/telegram/users")
 def telegram_users_api():
@@ -1424,28 +1769,55 @@ def telegram_users_api():
             connection.close()
     return jsonify([dict(row) for row in rows])
 
+
 @app.post("/telegram/test")
 def telegram_test_api():
     if not strict_admin_authorized():
         return jsonify({"error": "unauthorized"}), 401
     if not TELEGRAM_BOT_TOKEN:
-        return jsonify({"error": "TELEGRAM_BOT_TOKEN is not configured"}), 400
+        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN not configured"}), 400
+
     body = request.get_json(force=True, silent=True) or {}
     chat_id = body.get("chat_id")
+
+    message = (
+        "✅ <b>Freedom Structure Scanner</b>\n\n"
+        f"Test time: <b>{now_utc_string()}</b>\n\n"
+        "Telegram delivery is working. You will receive A→F alerts here."
+    )
+
     if chat_id:
-        success = tg_send(
-            chat_id,
-            f"✅ Freedom Structure Scanner Test\n\nTimestamp: {epoch_to_utc(int(time.time()))}\n\nTelegram connection is working."
-        )
-        return jsonify({"ok": success, "sent": int(success)})
+        ok, detail = tg_send(str(chat_id).strip(), message)
+        return jsonify({
+            "ok": ok, "sent": int(ok), "detail": detail,
+            "chat_id": str(chat_id).strip(),
+        })
+
     with DB_LOCK:
         connection = db()
         try:
-            users = connection.execute("SELECT chat_id FROM telegram_users WHERE active=1").fetchall()
+            users = connection.execute(
+                "SELECT chat_id FROM telegram_users WHERE active=1"
+            ).fetchall()
         finally:
             connection.close()
-    sent = sum(1 for u in users if tg_send(u["chat_id"], f"✅ Freedom Structure Scanner Test\n\nTimestamp: {epoch_to_utc(int(time.time()))}\n\nTelegram connection is working."))
-    return jsonify({"ok": sent > 0, "targeted": len(users), "sent": sent})
+
+    if not users:
+        return jsonify({"ok": False, "error": "No active users", "sent": 0}), 400
+
+    sent = 0
+    failed = []
+    for user in users:
+        ok, _detail = tg_send(user["chat_id"], message)
+        if ok:
+            sent += 1
+        else:
+            failed.append(user["chat_id"])
+    return jsonify({
+        "ok": sent > 0, "targeted": len(users), "sent": sent,
+        "failed": failed, "time_utc": now_utc_string(),
+    })
+
 
 @app.post("/telegram/broadcast")
 def telegram_broadcast_api():
@@ -1458,11 +1830,14 @@ def telegram_broadcast_api():
     with DB_LOCK:
         connection = db()
         try:
-            users = connection.execute("SELECT chat_id FROM telegram_users WHERE active=1").fetchall()
+            users = connection.execute(
+                "SELECT chat_id FROM telegram_users WHERE active=1"
+            ).fetchall()
         finally:
             connection.close()
-    sent = sum(1 for u in users if tg_send(u["chat_id"], text))
+    sent = sum(1 for u in users if tg_send(u["chat_id"], text)[0])
     return jsonify({"targeted": len(users), "sent": sent})
+
 
 # ============================================================
 # ADMIN ROUTES
@@ -1478,15 +1853,65 @@ def admin_reset_api():
         connection = db()
         try:
             if raw_pair and timeframe:
-                connection.execute("DELETE FROM structures WHERE pair=? AND timeframe=?", (canonical_symbol(raw_pair), timeframe.upper()))
+                connection.execute(
+                    "DELETE FROM structures WHERE pair=? AND timeframe=?",
+                    (canonical_symbol(raw_pair), timeframe.upper()),
+                )
             elif raw_pair:
-                connection.execute("DELETE FROM structures WHERE pair=?", (canonical_symbol(raw_pair),))
+                connection.execute(
+                    "DELETE FROM structures WHERE pair=?",
+                    (canonical_symbol(raw_pair),),
+                )
             else:
                 connection.execute("DELETE FROM structures")
             connection.commit()
         finally:
             connection.close()
+    SCANNER_LAST.clear()
     return jsonify({"ok": True, "message": "Structure memory reset"})
+
+
+@app.post("/admin/repair-database")
+def admin_repair_database_api():
+    if not strict_admin_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    quarantine_corrupt_database()
+    return jsonify({"ok": True, "message": "Database quarantined. New DB will be created on next request."})
+
+
+@app.get("/admin/database")
+def admin_database_api():
+    if not strict_admin_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    absolute_path = os.path.abspath(DB_PATH)
+    file_size = os.path.getsize(absolute_path) if os.path.exists(absolute_path) else 0
+    with DB_LOCK:
+        connection = db()
+        try:
+            structures_total = connection.execute("SELECT COUNT(*) FROM structures").fetchone()[0]
+            complete_total = connection.execute(
+                "SELECT COUNT(*) FROM structures WHERE state='COMPLETE'"
+            ).fetchone()[0]
+            telegram_total = connection.execute(
+                "SELECT COUNT(*) FROM telegram_users WHERE active=1"
+            ).fetchone()[0]
+            targets_total = connection.execute(
+                "SELECT COUNT(*) FROM scanner_targets WHERE active=1"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+    return jsonify({
+        "ok": True,
+        "path": absolute_path,
+        "persistent": absolute_path.startswith("/var/data"),
+        "size_bytes": file_size,
+        "structures_total": structures_total,
+        "structures_complete": complete_total,
+        "telegram_users": telegram_total,
+        "scanner_targets": targets_total,
+        "time_utc": now_utc_string(),
+    })
+
 
 # ============================================================
 # START SCANNER
