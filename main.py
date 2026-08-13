@@ -3,14 +3,17 @@ import encodings
 import json
 import os
 import sqlite3
+import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 import websocket
+
 
 # ============================================================
 # STARTUP
@@ -27,23 +30,80 @@ try:
 except LookupError as exc:
     print(f"[Startup] IDNA codec ERROR: {exc}")
 
+
 app = Flask(__name__)
+
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "YOUR_APP_ID_HERE")
-DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "1089")
+DERIV_WS_URL = (
+    "wss://ws.derivws.com/websockets/v3"
+    f"?app_id={DERIV_APP_ID}"
+)
 
-# Persistent disk path on Render.
-# Set DB_PATH=/var/data/structure_memory.db in Render environment
-DB_PATH = os.environ.get("DB_PATH", "structure_memory.db")
+TELEGRAM_BOT_TOKEN = os.environ.get(
+    "TELEGRAM_BOT_TOKEN",
+    "",
+)
+
+ADMIN_KEY = os.environ.get(
+    "ADMIN_KEY",
+    "",
+)
 
 DEFAULT_SCANNER_INTERVAL = 120
 DEFAULT_CANDLE_COUNT = 1000
+
+# G must reach at least this percentage of the B -> E range.
+# 0.90 means 90%, while touching or exceeding E is stronger.
+G_MIN_REACH = max(
+    0.50,
+    min(
+        1.20,
+        float(
+            os.environ.get(
+                "SCANNER_G_MIN_REACH",
+                "0.90",
+            )
+        ),
+    ),
+)
+
+TRADE_SL_ATR_MULTIPLIER = max(
+    0.0,
+    float(
+        os.environ.get(
+            "TRADE_SL_ATR_MULTIPLIER",
+            "1.0",
+        )
+    ),
+)
+
+TRADE_TP3_EXTENSION = max(
+    0.0,
+    float(
+        os.environ.get(
+            "TRADE_TP3_EXTENSION",
+            "0.15",
+        )
+    ),
+)
+
+# A-zone uses A candle low/body for bullish and body/high for bearish.
+# Optional ATR expansion around the zone.
+A_ZONE_ATR_BUFFER = max(
+    0.0,
+    float(
+        os.environ.get(
+            "A_ZONE_ATR_BUFFER",
+            "0.0",
+        )
+    ),
+)
+
 
 TIMEFRAME_MAP = {
     "M1": 60,
@@ -51,35 +111,37 @@ TIMEFRAME_MAP = {
     "M15": 900,
     "M30": 1800,
     "H1": 3600,
-    "H2": 7200,
     "H4": 14400,
-    "H8": 28800,
-    "H24": 86400,
+    "D1": 86400,
 }
 
-# Curated set of supported symbols.
+
 SYMBOL_MAP = {
-    # Volatility indices (Deriv native)
+    # Volatility indices
     "R_10": "R_10",
     "R_25": "R_25",
     "R_50": "R_50",
     "R_75": "R_75",
     "R_100": "R_100",
+
     "V10": "R_10",
     "V25": "R_25",
     "V50": "R_50",
     "V75": "R_75",
     "V100": "R_100",
+
     "VOLATILITY10": "R_10",
     "VOLATILITY25": "R_25",
     "VOLATILITY50": "R_50",
     "VOLATILITY75": "R_75",
     "VOLATILITY100": "R_100",
-    # Boom / Crash
+
+    # Boom and Crash
     "BOOM500": "BOOM500",
     "BOOM1000": "BOOM1000",
     "CRASH500": "CRASH500",
     "CRASH1000": "CRASH1000",
+
     # Forex
     "EURUSD": "frxEURUSD",
     "GBPUSD": "frxGBPUSD",
@@ -92,7 +154,7 @@ SYMBOL_MAP = {
     "GBPJPY": "frxGBPJPY",
     "EURJPY": "frxEURJPY",
     "AUDJPY": "frxAUDJPY",
-    "XAUUSD": "frxXAUUSD",
+
     "FRXEURUSD": "frxEURUSD",
     "FRXGBPUSD": "frxGBPUSD",
     "FRXUSDJPY": "frxUSDJPY",
@@ -104,14 +166,25 @@ SYMBOL_MAP = {
     "FRXGBPJPY": "frxGBPJPY",
     "FRXEURJPY": "frxEURJPY",
     "FRXAUDJPY": "frxAUDJPY",
+
+    # Metals
+    "XAUUSD": "frxXAUUSD",
+    "GOLD": "frxXAUUSD",
     "FRXXAUUSD": "frxXAUUSD",
+
+    "XAGUSD": "frxXAGUSD",
+    "SILVER": "frxXAGUSD",
+    "FRXXAGUSD": "frxXAGUSD",
 }
+
 
 DB_LOCK = threading.RLock()
 SCAN_LOCK = threading.Lock()
+
 SCANNER_THREAD = None
 SCANNER_STOP = threading.Event()
 SCANNER_LAST = {}
+
 SCANNER_DIAGNOSTICS = {
     "last_check": {},
     "last_success": {},
@@ -121,23 +194,108 @@ SCANNER_DIAGNOSTICS = {
 
 
 # ============================================================
+# DATABASE PATH
+# ============================================================
+
+def path_is_writable(candidate):
+    directory = os.path.dirname(os.path.abspath(candidate)) or "."
+
+    try:
+        if not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+    except Exception:
+        return False
+
+    if not os.access(directory, os.W_OK):
+        return False
+
+    probe = os.path.join(directory, ".trade_signal_probe")
+
+    try:
+        with open(probe, "w") as handle:
+            handle.write("ok")
+
+        os.remove(probe)
+        return True
+
+    except Exception:
+        return False
+
+
+def resolve_db_path():
+    requested = os.environ.get("DB_PATH", "").strip()
+
+    candidates = []
+
+    if requested:
+        candidates.append(requested)
+
+    # This is only writable when a Render persistent disk exists.
+    candidates.append("/var/data/structure_memory.db")
+
+    # Normal Render project directory. Ephemeral, but writable.
+    candidates.append(
+        os.path.join(
+            os.getcwd(),
+            "structure_memory.db",
+        )
+    )
+
+    # Last-resort writable temporary directory.
+    candidates.append(
+        os.path.join(
+            tempfile.gettempdir(),
+            "structure_memory.db",
+        )
+    )
+
+    for candidate in candidates:
+        if path_is_writable(candidate):
+            chosen = os.path.abspath(candidate)
+
+            if requested and chosen != os.path.abspath(requested):
+                print(
+                    f"[DB] Requested path is not writable: {requested}"
+                )
+                print(f"[DB] Using fallback path: {chosen}")
+
+            return chosen
+
+    fallback = os.path.join(
+        tempfile.gettempdir(),
+        "structure_memory.db",
+    )
+
+    print(f"[DB] Using final fallback: {fallback}")
+    return fallback
+
+
+DB_PATH = resolve_db_path()
+DB_IS_PERSISTENT = DB_PATH.startswith("/var/data")
+
+print(f"[DB] Using database: {DB_PATH}")
+
+if not DB_IS_PERSISTENT:
+    print(
+        "[DB] WARNING: database storage is ephemeral. "
+        "Telegram registrations and trade plans can reset after redeploy."
+    )
+
+
+# ============================================================
 # SYMBOL HELPERS
 # ============================================================
 
 def canonical_symbol(value):
-    """
-    Map user input to a supported Deriv symbol.
-
-    Reject anything that is not in SYMBOL_MAP.
-    """
     if value is None:
         return ""
 
     raw = str(value).strip()
+
     if not raw:
         return ""
 
-    upper = raw.upper().strip()
+    upper = raw.upper()
 
     compact = (
         upper
@@ -155,91 +313,77 @@ def canonical_symbol(value):
 
     if compact.startswith("FRX") and len(compact) > 3:
         candidate = "frx" + compact[3:]
+
         if candidate in SYMBOL_MAP.values():
             return candidate
 
     return ""
 
 
-def is_supported_symbol(value):
-    return canonical_symbol(value) != ""
-
-
 def unique_values(values):
-    output = []
+    result = []
     seen = set()
+
     for value in values:
         if value and value not in seen:
             seen.add(value)
-            output.append(value)
-    return output
+            result.append(value)
+
+    return result
+
+
+def split_csv(value):
+    if not value:
+        return []
+
+    return [
+        item.strip()
+        for item in str(value).split(",")
+        if item.strip()
+    ]
+
+
+# ============================================================
+# TIME HELPERS
+# ============================================================
+
+def epoch_to_utc(epoch):
+    moment = datetime.fromtimestamp(
+        int(epoch),
+        tz=timezone.utc,
+    )
+
+    return moment.strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+
+def now_utc_string():
+    return epoch_to_utc(int(time.time()))
 
 
 # ============================================================
 # DATABASE
 # ============================================================
 
-def ensure_database_directory():
-    absolute = os.path.abspath(DB_PATH)
-    directory = os.path.dirname(absolute)
-    if directory and not os.path.exists(directory):
+def delete_database_files():
+    for suffix in (
+        "",
+        "-wal",
+        "-shm",
+        "-journal",
+    ):
+        path = DB_PATH + suffix
+
         try:
-            os.makedirs(directory, exist_ok=True)
-            print(f"[DB] Created directory: {directory}")
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"[DB] Removed {path}")
         except Exception as exc:
-            print(f"[DB] Could not create directory: {exc}")
-
-
-def is_database_corrupt():
-    """
-    Quick corruption check.
-
-    Returns True if the database is malformed.
-    """
-    if not os.path.exists(DB_PATH):
-        return False
-
-    try:
-        check = sqlite3.connect(DB_PATH, timeout=5)
-        check.row_factory = None
-        check.execute("PRAGMA quick_check")
-        check.close()
-        return False
-    except sqlite3.DatabaseError:
-        return True
-    except Exception:
-        return False
-
-
-def quarantine_corrupt_database():
-    """
-    Rename a corrupt database file so a fresh one can be created.
-    """
-    if not os.path.exists(DB_PATH):
-        return
-
-    corrupt_path = f"{DB_PATH}.corrupt.{int(time.time())}"
-
-    for suffix in ("", "-wal", "-shm"):
-        source = f"{DB_PATH}{suffix}"
-        destination = f"{corrupt_path}{suffix}"
-
-        if os.path.exists(source):
-            try:
-                os.rename(source, destination)
-                print(f"[DB] Quarantined: {source} -> {destination}")
-            except Exception as exc:
-                print(f"[DB] Could not move {source}: {exc}")
-                try:
-                    os.remove(source)
-                except Exception:
-                    pass
+            print(f"[DB] Could not remove {path}: {exc}")
 
 
 def create_schema(connection):
-    """
-    Create all tables and indexes. Idempotent.
-    """
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS structures(
@@ -249,13 +393,20 @@ def create_schema(connection):
             timeframe TEXT NOT NULL,
             direction TEXT NOT NULL,
             state TEXT NOT NULL,
+            stage TEXT DEFAULT '',
+            context_only INTEGER DEFAULT 0,
             a_json TEXT,
             b_json TEXT,
             c_json TEXT,
             d_json TEXT,
             e_json TEXT,
             f_json TEXT,
+            g_json TEXT,
             fib50 REAL,
+            a_zone_low REAL,
+            a_zone_high REAL,
+            entry_price REAL,
+            entry_epoch INTEGER DEFAULT 0,
             valid INTEGER DEFAULT 0,
             telegram_sent INTEGER DEFAULT 0,
             created_epoch INTEGER,
@@ -290,53 +441,88 @@ def create_schema(connection):
         """
     )
 
-    # Migrate old schemas
-    try:
-        existing_columns = {
-            row[1]
-            for row in connection.execute(
-                "PRAGMA table_info(structures)"
-            ).fetchall()
-        }
-
-        if "live_from_epoch" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE structures ADD COLUMN live_from_epoch INTEGER DEFAULT 0"
-            )
-
-        if "discard_reason" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE structures ADD COLUMN discard_reason TEXT DEFAULT ''"
-            )
-    except sqlite3.DatabaseError as exc:
-        print(f"[DB] Migration warning: {exc}")
-
     connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_structures_pair_timeframe ON structures(pair, timeframe)"
+        """
+        CREATE TABLE IF NOT EXISTS telegram_trade_alerts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_key TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            pair TEXT,
+            timeframe TEXT,
+            direction TEXT,
+            f_message_id INTEGER DEFAULT 0,
+            g_message_id INTEGER DEFAULT 0,
+            active_message_id INTEGER DEFAULT 0,
+            plan_json TEXT,
+            trade_state TEXT DEFAULT 'WAITING_FOR_G',
+            last_event TEXT DEFAULT '',
+            created_epoch INTEGER,
+            updated_epoch INTEGER,
+            UNIQUE(structure_key, chat_id)
+        )
+        """
     )
+
+    # Migrations for databases created by older versions.
+    existing_columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(structures)"
+        ).fetchall()
+    }
+
+    migrations = {
+        "stage": "TEXT DEFAULT ''",
+        "context_only": "INTEGER DEFAULT 0",
+        "g_json": "TEXT",
+        "a_zone_low": "REAL",
+        "a_zone_high": "REAL",
+        "entry_price": "REAL",
+        "entry_epoch": "INTEGER DEFAULT 0",
+        "live_from_epoch": "INTEGER DEFAULT 0",
+        "discard_reason": "TEXT DEFAULT ''",
+    }
+
+    for column, definition in migrations.items():
+        if column not in existing_columns:
+            try:
+                connection.execute(
+                    f"ALTER TABLE structures ADD COLUMN "
+                    f"{column} {definition}"
+                )
+            except Exception as exc:
+                print(
+                    f"[DB] Migration skipped for {column}: {exc}"
+                )
+
     connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_structures_state ON structures(state)"
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_structures_pair_timeframe
+        ON structures(pair, timeframe)
+        """
     )
+
     connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_structures_updated ON structures(updated_epoch)"
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_structures_state
+        ON structures(state)
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_trade_alerts_state
+        ON telegram_trade_alerts(trade_state)
+        """
     )
 
     connection.commit()
 
 
-def db():
-    """
-    Open (or create) the SQLite database with WAL mode.
-
-    Recovers automatically if the database is corrupt.
-    """
-    ensure_database_directory()
-
-    # Recovery: if database is corrupt, quarantine it and start fresh.
-    if is_database_corrupt():
-        print("[DB] Corruption detected. Recovering...")
-        quarantine_corrupt_database()
-
+def open_database():
     connection = sqlite3.connect(
         DB_PATH,
         timeout=30,
@@ -346,40 +532,75 @@ def db():
     connection.row_factory = sqlite3.Row
 
     try:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA busy_timeout=30000")
-        connection.execute("PRAGMA foreign_keys=ON")
-    except sqlite3.DatabaseError as exc:
-        print(f"[DB] PRAGMA warning: {exc}")
+        connection.execute(
+            "PRAGMA busy_timeout=30000"
+        )
+        connection.execute(
+            "PRAGMA journal_mode=WAL"
+        )
+        connection.execute(
+            "PRAGMA synchronous=NORMAL"
+        )
+        connection.execute(
+            "PRAGMA foreign_keys=ON"
+        )
+    except sqlite3.DatabaseError:
+        pass
 
     create_schema(connection)
-
     return connection
 
 
+def db():
+    connection = None
+
+    try:
+        connection = open_database()
+        connection.execute("SELECT 1")
+        return connection
+
+    except sqlite3.DatabaseError as exc:
+        print(f"[DB] Database error: {exc}")
+        print("[DB] Rebuilding database")
+
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+        delete_database_files()
+        return open_database()
+
+
+try:
+    with DB_LOCK:
+        startup_connection = db()
+        startup_connection.close()
+
+    print(f"[DB] Ready at {DB_PATH}")
+
+except Exception as exc:
+    print(f"[DB] Startup database error: {exc}")
+    delete_database_files()
+
+    with DB_LOCK:
+        startup_connection = db()
+        startup_connection.close()
+
+
 # ============================================================
-# TIME HELPERS
+# SERIALIZATION
 # ============================================================
 
-def epoch_to_utc(epoch):
-    return datetime.fromtimestamp(
-        int(epoch), tz=timezone.utc
-    ).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def now_utc_string():
-    return epoch_to_utc(int(time.time()))
-
-
-# ============================================================
-# STRUCTURE SERIALIZATION
-# ============================================================
-
-def j(value):
+def json_value(value):
     if value is None:
         return None
-    return json.dumps(value, separators=(",", ":"))
+
+    return json.dumps(
+        value,
+        separators=(",", ":"),
+    )
 
 
 def point(label, role, candle, price):
@@ -406,88 +627,258 @@ def structure_key(structure):
     )
 
 
-def fibonacci_level(b_price, e_price, ratio=0.5):
-    ratio = max(0.0, min(1.0, float(ratio)))
-    return float(b_price + ((e_price - b_price) * ratio))
+def set_stage(structure, stage):
+    structure["stage"] = stage
+    structure["state"] = stage
+    return structure
 
 
-def save(structure):
+def structure_a_zone(structure, candles=None):
+    """
+    Bullish:
+        A low to A candle body high
+
+    Bearish:
+        A candle body low to A high
+    """
+
+    if structure.get("a_zone_low") is not None:
+        return (
+            float(structure["a_zone_low"]),
+            float(structure["a_zone_high"]),
+        )
+
+    a = structure["a"]
+
+    candle_low = float(a["low"])
+    candle_high = float(a["high"])
+    candle_body_low = min(
+        float(a["open"]),
+        float(a["close"]),
+    )
+    candle_body_high = max(
+        float(a["open"]),
+        float(a["close"]),
+    )
+
+    if structure["direction"] == "BULLISH":
+        zone_low = candle_low
+        zone_high = candle_body_high
+    else:
+        zone_low = candle_body_low
+        zone_high = candle_high
+
+    # Optional ATR zone buffer.
+    if candles and A_ZONE_ATR_BUFFER > 0:
+        index = None
+
+        for position, item in enumerate(candles):
+            if int(item["epoch"]) == int(a["epoch"]):
+                index = position
+                break
+
+        if index is not None:
+            atr_values = atrs(candles)
+            local_atr = atr_values[index]
+
+            if local_atr:
+                buffer = local_atr * A_ZONE_ATR_BUFFER
+
+                if structure["direction"] == "BULLISH":
+                    zone_low -= buffer
+                else:
+                    zone_high += buffer
+
+    return (
+        float(zone_low),
+        float(zone_high),
+    )
+
+
+def apply_zone_to_structure(structure, candles=None):
+    zone_low, zone_high = structure_a_zone(
+        structure,
+        candles,
+    )
+
+    structure["a_zone_low"] = zone_low
+    structure["a_zone_high"] = zone_high
+
+    return structure
+
+
+def structure_to_row_values(structure):
     now = int(time.time())
-    key = structure_key(structure)
 
-    values = {
-        "structure_key": key,
+    return {
+        "structure_key": structure_key(structure),
         "pair": structure["pair"],
         "timeframe": structure["timeframe"],
         "direction": structure["direction"],
-        "state": structure["state"],
-        "a_json": j(structure.get("a")),
-        "b_json": j(structure.get("b")),
-        "c_json": j(structure.get("c")),
-        "d_json": j(structure.get("d")),
-        "e_json": j(structure.get("e")),
-        "f_json": j(structure.get("f")),
+        "state": structure.get(
+            "state",
+            structure.get("stage", "WAITING_FOR_BOS"),
+        ),
+        "stage": structure.get(
+            "stage",
+            structure.get("state", "WAITING_FOR_BOS"),
+        ),
+        "context_only": int(
+            bool(structure.get("context_only", False))
+        ),
+        "a_json": json_value(structure.get("a")),
+        "b_json": json_value(structure.get("b")),
+        "c_json": json_value(structure.get("c")),
+        "d_json": json_value(structure.get("d")),
+        "e_json": json_value(structure.get("e")),
+        "f_json": json_value(structure.get("f")),
+        "g_json": json_value(structure.get("g")),
         "fib50": structure.get("fib50"),
+        "a_zone_low": structure.get("a_zone_low"),
+        "a_zone_high": structure.get("a_zone_high"),
+        "entry_price": structure.get("entry_price"),
+        "entry_epoch": int(
+            structure.get("entry_epoch", 0)
+        ),
         "valid": int(bool(structure.get("valid"))),
-        "telegram_sent": int(bool(structure.get("telegram_sent"))),
-        "discard_reason": structure.get("discard_reason", ""),
-        "created_epoch": int(structure.get("created_epoch", structure["a"]["epoch"])),
+        "telegram_sent": int(
+            bool(structure.get("telegram_sent"))
+        ),
+        "created_epoch": int(
+            structure.get(
+                "created_epoch",
+                structure["a"]["epoch"],
+            )
+        ),
         "updated_epoch": now,
-        "live_from_epoch": int(structure.get("live_from_epoch", 0)),
+        "live_from_epoch": int(
+            structure.get("live_from_epoch", 0)
+        ),
+        "discard_reason": structure.get(
+            "discard_reason",
+            "",
+        ),
     }
+
+
+def save(structure):
+    apply_zone_to_structure(structure)
+
+    values = structure_to_row_values(structure)
 
     with DB_LOCK:
         connection = db()
+
         try:
             connection.execute(
                 """
                 INSERT INTO structures(
-                    structure_key, pair, timeframe, direction, state,
-                    a_json, b_json, c_json, d_json, e_json, f_json,
-                    fib50, valid, telegram_sent, discard_reason,
-                    created_epoch, updated_epoch, live_from_epoch
+                    structure_key,
+                    pair,
+                    timeframe,
+                    direction,
+                    state,
+                    stage,
+                    context_only,
+                    a_json,
+                    b_json,
+                    c_json,
+                    d_json,
+                    e_json,
+                    f_json,
+                    g_json,
+                    fib50,
+                    a_zone_low,
+                    a_zone_high,
+                    entry_price,
+                    entry_epoch,
+                    valid,
+                    telegram_sent,
+                    created_epoch,
+                    updated_epoch,
+                    live_from_epoch,
+                    discard_reason
                 )
                 VALUES(
-                    :structure_key, :pair, :timeframe, :direction, :state,
-                    :a_json, :b_json, :c_json, :d_json, :e_json, :f_json,
-                    :fib50, :valid, :telegram_sent, :discard_reason,
-                    :created_epoch, :updated_epoch, :live_from_epoch
+                    :structure_key,
+                    :pair,
+                    :timeframe,
+                    :direction,
+                    :state,
+                    :stage,
+                    :context_only,
+                    :a_json,
+                    :b_json,
+                    :c_json,
+                    :d_json,
+                    :e_json,
+                    :f_json,
+                    :g_json,
+                    :fib50,
+                    :a_zone_low,
+                    :a_zone_high,
+                    :entry_price,
+                    :entry_epoch,
+                    :valid,
+                    :telegram_sent,
+                    :created_epoch,
+                    :updated_epoch,
+                    :live_from_epoch,
+                    :discard_reason
                 )
                 ON CONFLICT(structure_key) DO UPDATE SET
                     state=excluded.state,
+                    stage=excluded.stage,
+                    context_only=excluded.context_only,
                     a_json=excluded.a_json,
                     b_json=excluded.b_json,
                     c_json=excluded.c_json,
                     d_json=excluded.d_json,
                     e_json=excluded.e_json,
                     f_json=excluded.f_json,
+                    g_json=excluded.g_json,
                     fib50=excluded.fib50,
+                    a_zone_low=excluded.a_zone_low,
+                    a_zone_high=excluded.a_zone_high,
+                    entry_price=excluded.entry_price,
+                    entry_epoch=excluded.entry_epoch,
                     valid=excluded.valid,
                     telegram_sent=CASE
-                        WHEN structures.telegram_sent=1 THEN 1
+                        WHEN structures.telegram_sent=1
+                        THEN 1
                         ELSE excluded.telegram_sent
                     END,
-                    discard_reason=excluded.discard_reason,
                     updated_epoch=excluded.updated_epoch,
-                    live_from_epoch=excluded.live_from_epoch
+                    live_from_epoch=excluded.live_from_epoch,
+                    discard_reason=excluded.discard_reason
                 """,
                 values,
             )
+
             connection.commit()
+
         except Exception:
             connection.rollback()
             raise
+
         finally:
             connection.close()
-    return key
 
 
-def row_to_s(row):
-    def parse_point(column):
-        value = row[column]
-        if not value:
-            return None
-        return json.loads(value)
+def parse_json_point(row, column):
+    value = row[column]
+
+    if not value:
+        return None
+
+    return json.loads(value)
+
+
+def row_to_structure(row):
+    try:
+        stage = row["stage"] or row["state"]
+    except Exception:
+        stage = row["state"]
 
     structure = {
         "id": row["id"],
@@ -496,23 +887,35 @@ def row_to_s(row):
         "timeframe": row["timeframe"],
         "direction": row["direction"],
         "state": row["state"],
-        "a": parse_point("a_json"),
-        "b": parse_point("b_json"),
-        "c": parse_point("c_json"),
-        "d": parse_point("d_json"),
-        "e": parse_point("e_json"),
-        "f": parse_point("f_json"),
+        "stage": stage,
+        "context_only": bool(
+            row["context_only"]
+            if "context_only" in row.keys()
+            else 0
+        ),
+        "a": parse_json_point(row, "a_json"),
+        "b": parse_json_point(row, "b_json"),
+        "c": parse_json_point(row, "c_json"),
+        "d": parse_json_point(row, "d_json"),
+        "e": parse_json_point(row, "e_json"),
+        "f": parse_json_point(row, "f_json"),
+        "g": parse_json_point(row, "g_json"),
         "fib50": row["fib50"],
+        "a_zone_low": row["a_zone_low"],
+        "a_zone_high": row["a_zone_high"],
+        "entry_price": row["entry_price"],
+        "entry_epoch": int(row["entry_epoch"] or 0),
         "valid": bool(row["valid"]),
         "telegram_sent": bool(row["telegram_sent"]),
-        "created_epoch": int(row["created_epoch"] or 0),
-        "updated_epoch": int(row["updated_epoch"] or 0),
-        "live_from_epoch": int(row["live_from_epoch"] or 0),
+        "live_from_epoch": int(
+            row["live_from_epoch"] or 0
+        ),
         "discard_reason": row["discard_reason"] or "",
     }
 
     b_point = structure.get("b")
     e_point = structure.get("e")
+
     if b_point and e_point:
         structure["fib"] = {
             "0": b_point["price"],
@@ -521,99 +924,74 @@ def row_to_s(row):
         }
     else:
         structure["fib"] = None
+
     return structure
 
 
 def structures_for(pair, timeframe):
     canonical_pair = canonical_symbol(pair)
     canonical_tf = str(timeframe).upper()
+
     with DB_LOCK:
         connection = db()
+
         try:
             rows = connection.execute(
-                "SELECT * FROM structures WHERE pair=? AND timeframe=? ORDER BY created_epoch ASC",
-                (canonical_pair, canonical_tf),
+                """
+                SELECT *
+                FROM structures
+                WHERE pair=?
+                  AND timeframe=?
+                  AND state != 'INVALID'
+                ORDER BY created_epoch ASC
+                """,
+                (
+                    canonical_pair,
+                    canonical_tf,
+                ),
             ).fetchall()
+
         finally:
             connection.close()
-    return [row_to_s(row) for row in rows]
+
+    return [
+        row_to_structure(row)
+        for row in rows
+    ]
 
 
 def delete_structure(structure):
     key = structure_key(structure)
+
     with DB_LOCK:
         connection = db()
+
         try:
-            connection.execute("DELETE FROM structures WHERE structure_key=?", (key,))
+            connection.execute(
+                """
+                DELETE FROM structures
+                WHERE structure_key=?
+                """,
+                (key,),
+            )
+
             connection.commit()
+
         finally:
             connection.close()
 
 
 # ============================================================
-# SCANNER TARGET MEMORY
-# ============================================================
-
-def database_scanner_targets():
-    with DB_LOCK:
-        connection = db()
-        try:
-            rows = connection.execute(
-                "SELECT pair, timeframe FROM scanner_targets WHERE active=1 ORDER BY pair, timeframe"
-            ).fetchall()
-        finally:
-            connection.close()
-    return [{"pair": row["pair"], "timeframe": row["timeframe"]} for row in rows]
-
-
-def replace_scanner_targets(pairs, timeframes):
-    canonical_pairs = unique_values(
-        [canonical_symbol(p) for p in pairs if is_supported_symbol(p)]
-    )
-    canonical_timeframes = unique_values(
-        [tf.upper() for tf in timeframes if tf.upper() in TIMEFRAME_MAP]
-    )
-
-    if not canonical_pairs:
-        raise ValueError("At least one valid pair is required")
-    if not canonical_timeframes:
-        raise ValueError("At least one supported timeframe is required")
-
-    targets = [
-        {"pair": pair, "timeframe": tf}
-        for pair in canonical_pairs
-        for tf in canonical_timeframes
-    ]
-    if len(targets) > 50:
-        raise ValueError("Maximum 50 pair/timeframe combinations")
-
-    now = int(time.time())
-    with DB_LOCK:
-        connection = db()
-        try:
-            connection.execute("DELETE FROM scanner_targets")
-            for target in targets:
-                connection.execute(
-                    "INSERT INTO scanner_targets(pair, timeframe, active, created_epoch, updated_epoch) VALUES(?,?,1,?,?)",
-                    (target["pair"], target["timeframe"], now, now),
-                )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-    return targets
-
-
-# ============================================================
-# DERIV DATA
+# DERIV CANDLES
 # ============================================================
 
 def get_candles(symbol, granularity, count=500):
     deriv_symbol = canonical_symbol(symbol)
+
     if not deriv_symbol:
-        raise ValueError(f"Unsupported symbol: {symbol}")
+        raise ValueError(
+            f"Unsupported symbol: {symbol}"
+        )
 
     result = []
     error_message = None
@@ -621,15 +999,23 @@ def get_candles(symbol, granularity, count=500):
     open_error = [None]
 
     def on_message(ws, message):
-        nonlocal result, error_message
+        nonlocal result
+        nonlocal error_message
+
         try:
             data = json.loads(message)
+
             if "candles" in data:
                 result = data["candles"]
                 done.set()
+
             elif "error" in data:
-                error_message = data["error"].get("message", str(data["error"]))
+                error_message = data["error"].get(
+                    "message",
+                    str(data["error"]),
+                )
                 done.set()
+
         except Exception as exc:
             error_message = str(exc)
             done.set()
@@ -641,14 +1027,22 @@ def get_candles(symbol, granularity, count=500):
 
     def on_open(ws):
         try:
-            ws.send(json.dumps({
-                "ticks_history": deriv_symbol,
-                "adjust_start_time": 1,
-                "count": max(100, min(int(count), 1000)),
-                "granularity": int(granularity),
-                "style": "candles",
-                "end": "latest",
-            }))
+            ws.send(
+                json.dumps(
+                    {
+                        "ticks_history": deriv_symbol,
+                        "adjust_start_time": 1,
+                        "count": max(
+                            100,
+                            min(int(count), 1000),
+                        ),
+                        "granularity": int(granularity),
+                        "style": "candles",
+                        "end": "latest",
+                    }
+                )
+            )
+
         except Exception as exc:
             open_error[0] = str(exc)
             done.set()
@@ -662,10 +1056,15 @@ def get_candles(symbol, granularity, count=500):
 
     worker = threading.Thread(
         target=socket.run_forever,
-        name=f"deriv-ws-{deriv_symbol}-{granularity}",
+        name=(
+            f"deriv-ws-{deriv_symbol}-"
+            f"{granularity}"
+        ),
         daemon=True,
     )
+
     worker.start()
+
     completed = done.wait(30)
 
     try:
@@ -675,14 +1074,29 @@ def get_candles(symbol, granularity, count=500):
 
     if open_error[0]:
         error_message = open_error[0]
-    if not completed and not result:
-        raise TimeoutError(f"Deriv request timed out for {deriv_symbol}")
-    if error_message:
-        raise RuntimeError(f"Deriv error for {deriv_symbol}: {error_message}")
-    if not result:
-        raise RuntimeError(f"Deriv returned no candles for {deriv_symbol}")
 
-    return sorted(result, key=lambda item: int(item.get("epoch", 0)))
+    if not completed and not result:
+        raise TimeoutError(
+            f"Deriv request timed out for {deriv_symbol}"
+        )
+
+    if error_message:
+        raise RuntimeError(
+            f"Deriv error for {deriv_symbol}: "
+            f"{error_message}"
+        )
+
+    if not result:
+        raise RuntimeError(
+            f"Deriv returned no candles for {deriv_symbol}"
+        )
+
+    return sorted(
+        result,
+        key=lambda item: int(
+            item.get("epoch", 0)
+        ),
+    )
 
 
 def normalize(rows):
@@ -701,8 +1115,10 @@ def normalize(rows):
 
 def closed_candles(rows, granularity):
     now = int(time.time())
+
     return [
-        candle for candle in rows
+        candle
+        for candle in rows
         if candle["epoch"] + int(granularity) <= now
     ]
 
@@ -716,84 +1132,178 @@ def atrs(candles, period=14):
         return []
 
     true_ranges = []
+
     for index, candle in enumerate(candles):
         if index == 0:
             true_range = candle["high"] - candle["low"]
         else:
             previous = candles[index - 1]
+
             true_range = max(
                 candle["high"] - candle["low"],
-                abs(candle["high"] - previous["close"]),
-                abs(candle["low"] - previous["close"]),
+                abs(
+                    candle["high"]
+                    - previous["close"]
+                ),
+                abs(
+                    candle["low"]
+                    - previous["close"]
+                ),
             )
+
         true_ranges.append(true_range)
 
     output = [0.0] * len(candles)
-    first_atr_index = max(0, int(period) - 1)
-    for index in range(first_atr_index, len(candles)):
-        start = max(0, index - int(period) + 1)
-        values = true_ranges[start:index + 1]
+    first_index = max(0, int(period) - 1)
+
+    for index in range(first_index, len(candles)):
+        start = max(
+            0,
+            index - int(period) + 1,
+        )
+
+        values = true_ranges[
+            start:index + 1
+        ]
+
         output[index] = sum(values) / len(values)
+
     return output
 
 
 def swings(candles, strength=3):
     strength = max(1, int(strength))
     output = []
-    for index in range(strength, len(candles) - strength):
+
+    for index in range(
+        strength,
+        len(candles) - strength,
+    ):
         candle = candles[index]
-        left = candles[index - strength:index]
-        right = candles[index + 1:index + strength + 1]
+
+        left = candles[
+            index - strength:index
+        ]
+
+        right = candles[
+            index + 1:index + strength + 1
+        ]
 
         is_low = (
-            all(candle["low"] < item["low"] for item in left) and
-            all(candle["low"] <= item["low"] for item in right)
+            all(
+                candle["low"] < item["low"]
+                for item in left
+            )
+            and all(
+                candle["low"] <= item["low"]
+                for item in right
+            )
         )
+
         is_high = (
-            all(candle["high"] > item["high"] for item in left) and
-            all(candle["high"] >= item["high"] for item in right)
+            all(
+                candle["high"] > item["high"]
+                for item in left
+            )
+            and all(
+                candle["high"] >= item["high"]
+                for item in right
+            )
         )
 
         if is_low:
-            output.append(("L", index, candle))
-        if is_high:
-            output.append(("H", index, candle))
+            output.append(
+                ("L", index, candle)
+            )
 
-    return sorted(output, key=lambda item: item[1])
+        if is_high:
+            output.append(
+                ("H", index, candle)
+            )
+
+    return sorted(
+        output,
+        key=lambda item: item[1],
+    )
 
 
 def pivot_price(kind, candle):
-    return candle["low"] if kind == "L" else candle["high"]
+    if kind == "L":
+        return candle["low"]
+
+    return candle["high"]
 
 
-def significant_swings(candles, strength=3, min_atr_move=0.25):
+def significant_swings(
+    candles,
+    strength=3,
+    min_atr_move=0.25,
+):
     raw = swings(candles, strength)
     atr_values = atrs(candles)
     reduced = []
 
     for kind, index, candle in raw:
         price = pivot_price(kind, candle)
+
         if not reduced:
-            reduced.append((kind, index, candle))
+            reduced.append(
+                (kind, index, candle)
+            )
             continue
 
-        previous_kind, previous_index, previous_candle = reduced[-1]
-        previous_price = pivot_price(previous_kind, previous_candle)
+        (
+            previous_kind,
+            previous_index,
+            previous_candle,
+        ) = reduced[-1]
+
+        previous_price = pivot_price(
+            previous_kind,
+            previous_candle,
+        )
 
         if kind == previous_kind:
             more_extreme = (
-                (kind == "L" and price < previous_price) or
-                (kind == "H" and price > previous_price)
+                (
+                    kind == "L"
+                    and price < previous_price
+                )
+                or (
+                    kind == "H"
+                    and price > previous_price
+                )
             )
+
             if more_extreme:
-                reduced[-1] = (kind, index, candle)
+                reduced[-1] = (
+                    kind,
+                    index,
+                    candle,
+                )
+
             continue
 
-        local_atr = atr_values[index] or atr_values[previous_index]
-        movement = abs(price - previous_price)
-        if local_atr and movement < local_atr * float(min_atr_move):
+        local_atr = (
+            atr_values[index]
+            or atr_values[previous_index]
+        )
+
+        movement = abs(
+            price - previous_price
+        )
+
+        if (
+            local_atr
+            and movement
+            < local_atr * float(min_atr_move)
+        ):
             continue
-        reduced.append((kind, index, candle))
+
+        reduced.append(
+            (kind, index, candle)
+        )
+
     return reduced
 
 
@@ -801,468 +1311,2214 @@ def significant_swings(candles, strength=3, min_atr_move=0.25):
 # A -> C -> B DISCOVERY
 # ============================================================
 
-def discover_abc(candles, pair, timeframe, direction, strength, min_atr, min_bars=1):
-    pivots = significant_swings(candles, strength=strength, min_atr_move=min_atr)
+def discover_abc(
+    candles,
+    pair,
+    timeframe,
+    direction,
+    strength,
+    min_atr,
+    min_bars=1,
+):
+    pivots = significant_swings(
+        candles,
+        strength=strength,
+        min_atr_move=min_atr,
+    )
+
     atr_values = atrs(candles)
     output = []
 
-    if direction == "BULLISH":
-        expected = ("L", "H", "L")
-    else:
-        expected = ("H", "L", "H")
+    expected = (
+        ("L", "H", "L")
+        if direction == "BULLISH"
+        else ("H", "L", "H")
+    )
 
-    for pivot_index in range(len(pivots) - 2):
-        a_kind, a_index, a_candle = pivots[pivot_index]
-        c_kind, c_index, c_candle = pivots[pivot_index + 1]
-        b_kind, b_index, b_candle = pivots[pivot_index + 2]
+    for pivot_index in range(
+        len(pivots) - 2
+    ):
+        (
+            a_kind,
+            a_index,
+            a_candle,
+        ) = pivots[pivot_index]
 
-        if (a_kind, c_kind, b_kind) != expected:
-            continue
-        if c_index - a_index < int(min_bars):
-            continue
-        if b_index - c_index < int(min_bars):
+        (
+            c_kind,
+            c_index,
+            c_candle,
+        ) = pivots[pivot_index + 1]
+
+        (
+            b_kind,
+            b_index,
+            b_candle,
+        ) = pivots[pivot_index + 2]
+
+        if (
+            a_kind,
+            c_kind,
+            b_kind,
+        ) != expected:
             continue
 
-        a_price = pivot_price(a_kind, a_candle)
-        c_price = pivot_price(c_kind, c_candle)
-        b_price = pivot_price(b_kind, b_candle)
+        if (
+            c_index - a_index
+            < int(min_bars)
+        ):
+            continue
+
+        if (
+            b_index - c_index
+            < int(min_bars)
+        ):
+            continue
+
+        a_price = pivot_price(
+            a_kind,
+            a_candle,
+        )
+
+        c_price = pivot_price(
+            c_kind,
+            c_candle,
+        )
+
+        b_price = pivot_price(
+            b_kind,
+            b_candle,
+        )
 
         if direction == "BULLISH":
             if b_price >= a_price:
                 continue
+
             sweep_size = a_price - b_price
+
         else:
             if b_price <= a_price:
                 continue
+
             sweep_size = b_price - a_price
 
-        local_atr = atr_values[b_index] or atr_values[a_index]
-        if local_atr and sweep_size < local_atr * float(min_atr):
+        local_atr = (
+            atr_values[b_index]
+            or atr_values[a_index]
+        )
+
+        if (
+            local_atr
+            and sweep_size
+            < local_atr * float(min_atr)
+        ):
             continue
 
-        c_displacement = abs(c_price - a_price)
-        if local_atr and c_displacement < local_atr * float(min_atr):
+        if (
+            local_atr
+            and abs(c_price - a_price)
+            < local_atr * float(min_atr)
+        ):
             continue
 
         structure = {
             "pair": canonical_symbol(pair),
             "timeframe": str(timeframe).upper(),
             "direction": direction,
-            "a": point("A", "INITIAL_SWING", a_candle, a_price),
-            "b": point("B", "STRUCTURAL_EXTREME", b_candle, b_price),
-            "c": point("C", "PREVIOUS_STRUCTURE", c_candle, c_price),
-            "d": None, "e": None, "f": None,
+
+            "a": point(
+                "A",
+                "INITIAL_SWING",
+                a_candle,
+                a_price,
+            ),
+
+            "b": point(
+                "B",
+                "STRUCTURAL_EXTREME",
+                b_candle,
+                b_price,
+            ),
+
+            "c": point(
+                "C",
+                "PREVIOUS_STRUCTURE",
+                c_candle,
+                c_price,
+            ),
+
+            "d": None,
+            "e": None,
+            "f": None,
+            "g": None,
+
             "fib50": None,
+            "a_zone_low": None,
+            "a_zone_high": None,
+            "entry_price": None,
+            "entry_epoch": 0,
+
+            "stage": "WAITING_FOR_BOS",
             "state": "WAITING_FOR_BOS",
+            "context_only": True,
             "valid": False,
             "telegram_sent": False,
             "discard_reason": "",
             "live_from_epoch": 0,
         }
+
+        apply_zone_to_structure(
+            structure,
+            candles,
+        )
+
         output.append(structure)
+
     return output
 
 
 # ============================================================
-# STRUCTURE ADVANCEMENT
+# ADVANCEMENT: D -> E -> F -> G
 # ============================================================
 
-def candle_breaks_level(candle, level, direction, bos_mode="body"):
+def candle_breaks_level(
+    candle,
+    level,
+    direction,
+    bos_mode="body",
+):
     if direction == "BULLISH":
         if bos_mode == "wick":
             return candle["high"] > level
+
         return candle["close"] > level
+
     if bos_mode == "wick":
         return candle["low"] < level
+
     return candle["close"] < level
 
 
-def mark_discarded(structure, reason):
-    structure["state"] = "DISCARDED"
+def mark_invalid(structure, reason):
+    structure["stage"] = "INVALID"
+    structure["state"] = "INVALID"
     structure["valid"] = False
     structure["discard_reason"] = reason
     return structure
 
 
-def advance(structure, candles, bos_mode="body", expansion_atr=0.5, displacement_atr=1.0,
-            allow_historical_f=False, swing_strength=3, min_atr_move=0.25, fib_ratio=0.5):
-
-    if structure.get("state") == "COMPLETE":
+def advance_structure(
+    structure,
+    candles,
+    bos_mode="body",
+    expansion_atr=0.5,
+    displacement_atr=1.0,
+    swing_strength=3,
+    min_atr_move=0.25,
+    fib_ratio=0.5,
+):
+    if structure.get("stage") in (
+        "ACTIVE",
+        "CLOSED",
+        "INVALID",
+    ):
         return structure
 
-    index_by_epoch = {candle["epoch"]: index for index, candle in enumerate(candles)}
+    index_by_epoch = {
+        candle["epoch"]: index
+        for index, candle in enumerate(candles)
+    }
+
     atr_values = atrs(candles)
-    pivots = significant_swings(candles, strength=swing_strength, min_atr_move=min_atr_move)
+
+    pivots = significant_swings(
+        candles,
+        strength=swing_strength,
+        min_atr_move=min_atr_move,
+    )
 
     direction = structure["direction"]
-    b_index = index_by_epoch.get(structure["b"]["epoch"])
-    c_index = index_by_epoch.get(structure["c"]["epoch"])
+
+    b_index = index_by_epoch.get(
+        structure["b"]["epoch"]
+    )
+
+    c_index = index_by_epoch.get(
+        structure["c"]["epoch"]
+    )
 
     if b_index is None or c_index is None:
-        return mark_discarded(structure, "pivot_missing_from_candle_window")
+        return mark_invalid(
+            structure,
+            "pivot_missing_from_candle_window",
+        )
 
     b_level = structure["b"]["price"]
     c_level = structure["c"]["price"]
 
+    # --------------------------------------------------------
+    # D = BOS
+    # --------------------------------------------------------
+
     if structure.get("d") is None:
-        replacement_kind = "L" if direction == "BULLISH" else "H"
+        replacement_kind = (
+            "L"
+            if direction == "BULLISH"
+            else "H"
+        )
+
         for kind, index, candle in pivots:
             if index <= b_index:
                 continue
+
             if kind != replacement_kind:
                 continue
-            replacement_price = pivot_price(kind, candle)
+
+            replacement_price = pivot_price(
+                kind,
+                candle,
+            )
+
             replaced = (
-                replacement_price < b_level if direction == "BULLISH"
+                replacement_price < b_level
+                if direction == "BULLISH"
                 else replacement_price > b_level
             )
+
             if replaced:
-                return mark_discarded(
+                return mark_invalid(
                     structure,
-                    "confirmed_new_lower_low_replaced_B" if direction == "BULLISH"
-                    else "confirmed_new_higher_high_replaced_B"
+                    "new_structural_extreme_replaced_B",
                 )
 
-    if structure.get("d") is None:
-        for index in range(b_index + 1, len(candles)):
+        for index in range(
+            b_index + 1,
+            len(candles),
+        ):
             candle = candles[index]
-            if candle_breaks_level(candle, c_level, direction, bos_mode):
-                d_price = candle["high"] if direction == "BULLISH" else candle["low"]
+
+            if candle_breaks_level(
+                candle,
+                c_level,
+                direction,
+                bos_mode,
+            ):
+                d_price = (
+                    candle["high"]
+                    if direction == "BULLISH"
+                    else candle["low"]
+                )
+
                 structure["d"] = point(
                     "D",
-                    "BODY_BOS" if bos_mode == "body" else "WICK_BOS",
+                    (
+                        "BODY_BOS"
+                        if bos_mode == "body"
+                        else "WICK_BOS"
+                    ),
                     candle,
-                    d_price
+                    d_price,
                 )
-                structure["state"] = "WAITING_FOR_E"
+
+                set_stage(
+                    structure,
+                    "WAITING_FOR_E",
+                )
+
                 break
 
     if structure.get("d") is None:
         return structure
 
-    d_index = index_by_epoch.get(structure["d"]["epoch"])
-    if d_index is None:
-        return mark_discarded(structure, "D_missing_from_candle_window")
+    d_index = index_by_epoch.get(
+        structure["d"]["epoch"]
+    )
 
-    for index in range(b_index + 1, len(candles)):
-        candle = candles[index]
-        broke_b = (
-            candle["low"] < b_level if direction == "BULLISH"
-            else candle["high"] > b_level
+    if d_index is None:
+        return mark_invalid(
+            structure,
+            "D_missing_from_candle_window",
         )
+
+    # --------------------------------------------------------
+    # Protected B validation
+    # --------------------------------------------------------
+
+    for index in range(
+        b_index + 1,
+        len(candles),
+    ):
+        candle = candles[index]
+
+        broke_b = (
+            candle["low"] <= b_level
+            if direction == "BULLISH"
+            else candle["high"] >= b_level
+        )
+
         if broke_b:
-            return mark_discarded(structure, "protected_B_was_broken")
+            return mark_invalid(
+                structure,
+                "protected_B_was_broken",
+            )
+
+    # --------------------------------------------------------
+    # E = expansion
+    # --------------------------------------------------------
 
     if structure.get("e") is None:
-        wanted_kind = "H" if direction == "BULLISH" else "L"
+        wanted_kind = (
+            "H"
+            if direction == "BULLISH"
+            else "L"
+        )
+
         for kind, index, candle in pivots:
             if index <= d_index:
                 continue
+
             if kind != wanted_kind:
                 continue
-            e_price = pivot_price(kind, candle)
-            expansion = (e_price - c_level) if direction == "BULLISH" else (c_level - e_price)
-            local_atr = atr_values[index] or atr_values[d_index]
+
+            e_price = pivot_price(
+                kind,
+                candle,
+            )
+
+            expansion = (
+                e_price - c_level
+                if direction == "BULLISH"
+                else c_level - e_price
+            )
+
+            local_atr = (
+                atr_values[index]
+                or atr_values[d_index]
+            )
+
             if expansion <= 0:
                 continue
-            if local_atr and expansion < local_atr * float(expansion_atr):
+
+            if (
+                local_atr
+                and expansion
+                < local_atr
+                * float(expansion_atr)
+            ):
                 continue
-            structure["e"] = point("E", "POST_BOS_EXPANSION", candle, e_price)
-            structure["fib50"] = fibonacci_level(structure["b"]["price"], structure["e"]["price"], fib_ratio)
-            structure["state"] = "WAITING_FOR_F"
+
+            structure["e"] = point(
+                "E",
+                "POST_BOS_EXPANSION",
+                candle,
+                e_price,
+            )
+
+            structure["fib50"] = fibonacci_level(
+                structure["b"]["price"],
+                structure["e"]["price"],
+                fib_ratio,
+            )
+
+            set_stage(
+                structure,
+                "WAITING_FOR_F",
+            )
+
             break
 
     if structure.get("e") is None:
         return structure
 
-    e_index = index_by_epoch.get(structure["e"]["epoch"])
-    if e_index is None:
-        return mark_discarded(structure, "E_missing_from_candle_window")
+    e_index = index_by_epoch.get(
+        structure["e"]["epoch"]
+    )
 
-    fib_threshold = structure["fib50"]
-    live_from = int(structure.get("live_from_epoch", 0))
+    if e_index is None:
+        return mark_invalid(
+            structure,
+            "E_missing_from_candle_window",
+        )
+
+    fib50 = structure["fib50"]
+
+    # --------------------------------------------------------
+    # F = first confirmed retracement beyond Fib 50
+    #
+    # F does not need to touch A-zone.
+    # It must remain above B for bullish or below B for bearish.
+    # --------------------------------------------------------
 
     if structure.get("f") is None:
-        wanted_kind = "L" if direction == "BULLISH" else "H"
+        wanted_kind = (
+            "L"
+            if direction == "BULLISH"
+            else "H"
+        )
+
         for kind, index, candle in pivots:
             if index <= e_index:
                 continue
+
             if kind != wanted_kind:
                 continue
-            if not allow_historical_f and live_from and candle["epoch"] <= live_from:
+
+            f_price = pivot_price(
+                kind,
+                candle,
+            )
+
+            reaches_fib = (
+                f_price <= fib50
+                if direction == "BULLISH"
+                else f_price >= fib50
+            )
+
+            if not reaches_fib:
                 continue
-            f_price = pivot_price(kind, candle)
-            reaches_threshold = (f_price <= fib_threshold) if direction == "BULLISH" else (f_price >= fib_threshold)
-            if not reaches_threshold:
+
+            breaks_protected_b = (
+                f_price <= b_level
+                if direction == "BULLISH"
+                else f_price >= b_level
+            )
+
+            if breaks_protected_b:
+                return mark_invalid(
+                    structure,
+                    "F_broke_protected_B",
+                )
+
+            structure["f"] = point(
+                "F",
+                "FIB_RETRACEMENT",
+                candle,
+                f_price,
+            )
+
+            set_stage(
+                structure,
+                "WAITING_FOR_G",
+            )
+
+            break
+
+    if structure.get("f") is None:
+        return structure
+
+    f_index = index_by_epoch.get(
+        structure["f"]["epoch"]
+    )
+
+    if f_index is None:
+        return mark_invalid(
+            structure,
+            "F_missing_from_candle_window",
+        )
+
+    # --------------------------------------------------------
+    # G = strength push near or beyond 100%
+    # --------------------------------------------------------
+
+    if structure.get("g") is None:
+        total_range = abs(
+            structure["e"]["price"]
+            - structure["b"]["price"]
+        )
+
+        if total_range <= 0:
+            return mark_invalid(
+                structure,
+                "invalid_B_E_range",
+            )
+
+        if direction == "BULLISH":
+            g_threshold = (
+                structure["b"]["price"]
+                + total_range * G_MIN_REACH
+            )
+            wanted_kind = "H"
+        else:
+            g_threshold = (
+                structure["b"]["price"]
+                - total_range * G_MIN_REACH
+            )
+            wanted_kind = "L"
+
+        for kind, index, candle in pivots:
+            if index <= f_index:
                 continue
-            invalidates_b = (f_price < b_level) if direction == "BULLISH" else (f_price > b_level)
-            if invalidates_b:
-                return mark_discarded(structure, "retracement_invalidated_B")
-            retracement_distance = abs(structure["e"]["price"] - f_price)
-            local_atr = atr_values[index]
-            if local_atr and retracement_distance < local_atr * float(displacement_atr):
+
+            if kind != wanted_kind:
                 continue
-            structure["f"] = point("F", "FIB_RETRACEMENT", candle, f_price)
-            structure["valid"] = True
-            structure["state"] = "COMPLETE"
-            structure["discard_reason"] = ""
+
+            g_price = pivot_price(
+                kind,
+                candle,
+            )
+
+            reaches_g = (
+                g_price >= g_threshold
+                if direction == "BULLISH"
+                else g_price <= g_threshold
+            )
+
+            if not reaches_g:
+                continue
+
+            structure["g"] = point(
+                "G",
+                "STRENGTH_PUSH",
+                candle,
+                g_price,
+            )
+
+            set_stage(
+                structure,
+                "WAITING_FOR_ENTRY",
+            )
+
             break
 
     return structure
 
 
 # ============================================================
-# TELEGRAM
+# TRADE PLAN CALCULATIONS
 # ============================================================
 
-def tg_send(chat_id, text):
-    if not TELEGRAM_BOT_TOKEN:
-        return False, "TELEGRAM_BOT_TOKEN not configured"
+def find_candle_index(candles, epoch):
+    for index, candle in enumerate(candles):
+        if int(candle["epoch"]) == int(epoch):
+            return index
 
-    data = urllib.parse.urlencode({
+    return None
+
+
+def sl_buffer_for(structure, candles):
+    b_index = find_candle_index(
+        candles,
+        structure["b"]["epoch"],
+    )
+
+    atr_values = atrs(candles)
+
+    if (
+        b_index is not None
+        and b_index < len(atr_values)
+        and atr_values[b_index] > 0
+    ):
+        return (
+            atr_values[b_index]
+            * TRADE_SL_ATR_MULTIPLIER
+        )
+
+    return abs(
+        structure["e"]["price"]
+        - structure["b"]["price"]
+    ) * 0.05
+
+
+def pending_trade_plan(structure, candles):
+    zone_low, zone_high = structure_a_zone(
+        structure,
+        candles,
+    )
+
+    buffer = sl_buffer_for(
+        structure,
+        candles,
+    )
+
+    if structure["direction"] == "BULLISH":
+        stop_loss = structure["b"]["price"] - buffer
+    else:
+        stop_loss = structure["b"]["price"] + buffer
+
+    return {
+        "structure_key": structure_key(structure),
+        "pair": structure["pair"],
+        "timeframe": structure["timeframe"],
+        "direction": structure["direction"],
+        "status": "WAITING_FOR_PULLBACK",
+        "entry_zone_low": round(zone_low, 5),
+        "entry_zone_high": round(zone_high, 5),
+        "stop_loss": round(stop_loss, 5),
+        "protected_B": round(
+            structure["b"]["price"],
+            5,
+        ),
+        "f_price": round(
+            structure["f"]["price"],
+            5,
+        ),
+        "g_price": round(
+            structure["g"]["price"],
+            5,
+        ),
+        "created_utc": now_utc_string(),
+    }
+
+
+def active_trade_plan(structure, candles):
+    entry = float(
+        structure["entry_price"]
+    )
+
+    zone_low, zone_high = structure_a_zone(
+        structure,
+        candles,
+    )
+
+    buffer = sl_buffer_for(
+        structure,
+        candles,
+    )
+
+    if structure["direction"] == "BULLISH":
+        stop_loss = structure["b"]["price"] - buffer
+    else:
+        stop_loss = structure["b"]["price"] + buffer
+
+    candidates = [
+        (
+            "D",
+            float(structure["d"]["price"]),
+        ),
+        (
+            "E",
+            float(structure["e"]["price"]),
+        ),
+        (
+            "G",
+            float(structure["g"]["price"]),
+        ),
+    ]
+
+    if structure["direction"] == "BULLISH":
+        valid_targets = [
+            item
+            for item in candidates
+            if item[1] > entry
+        ]
+
+        valid_targets.sort(
+            key=lambda item: item[1]
+        )
+
+    else:
+        valid_targets = [
+            item
+            for item in candidates
+            if item[1] < entry
+        ]
+
+        valid_targets.sort(
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+    target_prices = []
+
+    for name, price in valid_targets:
+        if not target_prices:
+            target_prices.append(price)
+            continue
+
+        if abs(price - target_prices[-1]) > 0.000001:
+            target_prices.append(price)
+
+    range_be = abs(
+        structure["e"]["price"]
+        - structure["b"]["price"]
+    )
+
+    if not target_prices:
+        if structure["direction"] == "BULLISH":
+            target_prices = [
+                entry + range_be * 0.5,
+                entry + range_be,
+            ]
+        else:
+            target_prices = [
+                entry - range_be * 0.5,
+                entry - range_be,
+            ]
+
+    tp1 = target_prices[0]
+
+    if len(target_prices) >= 2:
+        tp2 = target_prices[1]
+    else:
+        if structure["direction"] == "BULLISH":
+            tp2 = tp1 + range_be * 0.5
+        else:
+            tp2 = tp1 - range_be * 0.5
+
+    if structure["direction"] == "BULLISH":
+        tp3 = tp2 + (
+            range_be * TRADE_TP3_EXTENSION
+        )
+    else:
+        tp3 = tp2 - (
+            range_be * TRADE_TP3_EXTENSION
+        )
+
+    risk = abs(entry - stop_loss)
+
+    rr1 = (
+        abs(tp1 - entry) / risk
+        if risk > 0
+        else 0.0
+    )
+
+    rr2 = (
+        abs(tp2 - entry) / risk
+        if risk > 0
+        else 0.0
+    )
+
+    rr3 = (
+        abs(tp3 - entry) / risk
+        if risk > 0
+        else 0.0
+    )
+
+    return {
+        "structure_key": structure_key(structure),
+        "pair": structure["pair"],
+        "timeframe": structure["timeframe"],
+        "direction": structure["direction"],
+        "status": "ACTIVE",
+        "entry_zone_low": round(zone_low, 5),
+        "entry_zone_high": round(zone_high, 5),
+        "entry": round(entry, 5),
+        "stop_loss": round(stop_loss, 5),
+        "protected_B": round(
+            structure["b"]["price"],
+            5,
+        ),
+        "tp1": round(tp1, 5),
+        "tp2": round(tp2, 5),
+        "tp3": round(tp3, 5),
+        "rr_tp1": round(rr1, 2),
+        "rr_tp2": round(rr2, 2),
+        "rr_tp3": round(rr3, 2),
+        "entry_epoch": int(
+            structure["entry_epoch"]
+        ),
+        "entry_time_utc": epoch_to_utc(
+            structure["entry_epoch"]
+        ),
+        "created_utc": now_utc_string(),
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "tp3_hit": False,
+        "sl_hit": False,
+        "trade_state": "ACTIVE",
+    }
+
+
+# ============================================================
+# CLOSED A-ZONE ENTRY CONFIRMATION
+# ============================================================
+
+def confirm_closed_entry(structure, candles):
+    """
+    Entry is confirmed only by a closed candle after G.
+
+    Bullish:
+        candle touches A-zone and closes bullish above zone high.
+
+    Bearish:
+        candle touches A-zone and closes bearish below zone low.
+
+    A wick into the zone is enough. The candle must close in the
+    expected direction.
+    """
+
+    if structure.get("stage") != "WAITING_FOR_ENTRY":
+        return False
+
+    if not structure.get("g"):
+        return False
+
+    zone_low, zone_high = structure_a_zone(
+        structure,
+        candles,
+    )
+
+    g_epoch = int(
+        structure["g"]["epoch"]
+    )
+
+    live_from = int(
+        structure.get("live_from_epoch", 0)
+    )
+
+    b_level = float(
+        structure["b"]["price"]
+    )
+
+    for candle in candles:
+        candle_epoch = int(
+            candle["epoch"]
+        )
+
+        if candle_epoch <= g_epoch:
+            continue
+
+        # Do not create a new live alert from a historical candle
+        # that existed before the structure became active.
+        if live_from and candle_epoch <= live_from:
+            continue
+
+        if structure["direction"] == "BULLISH":
+            touched = (
+                candle["low"] <= zone_high
+                and candle["high"] >= zone_low
+            )
+
+            rejection_close = (
+                candle["close"] > zone_high
+                and candle["close"] > candle["open"]
+            )
+
+            broke_b = candle["low"] <= b_level
+
+        else:
+            touched = (
+                candle["high"] >= zone_low
+                and candle["low"] <= zone_high
+            )
+
+            rejection_close = (
+                candle["close"] < zone_low
+                and candle["close"] < candle["open"]
+            )
+
+            broke_b = candle["high"] >= b_level
+
+        if broke_b:
+            return mark_invalid(
+                structure,
+                "protected_B_broken_before_entry",
+            )
+
+        if touched and rejection_close:
+            structure["entry_price"] = float(
+                candle["close"]
+            )
+
+            structure["entry_epoch"] = candle_epoch
+
+            set_stage(
+                structure,
+                "ACTIVE",
+            )
+
+            return True
+
+    return False
+
+
+# ============================================================
+# TELEGRAM TEXT
+# ============================================================
+
+def f_message_text(structure):
+    icon = (
+        "🟢"
+        if structure["direction"] == "BULLISH"
+        else "🔴"
+    )
+
+    return "\n".join(
+        [
+            f"{icon} <b>{structure['direction']} F CONFIRMED</b>",
+            "",
+            f"Symbol: <b>{structure['pair']}</b>",
+            f"Timeframe: <b>{structure['timeframe']}</b>",
+            f"F time: <b>{epoch_to_utc(structure['f']['epoch'])}</b>",
+            "",
+            "F reached the Fibonacci retracement threshold.",
+            "F did not break protected B.",
+            "",
+            "Watching for G strength push near or beyond 100%.",
+            "",
+            f"Message time: <b>{now_utc_string()}</b>",
+        ]
+    )
+
+
+def g_message_text(structure, candles):
+    plan = pending_trade_plan(
+        structure,
+        candles,
+    )
+
+    icon = (
+        "🟢"
+        if structure["direction"] == "BULLISH"
+        else "🔴"
+    )
+
+    return "\n".join(
+        [
+            f"{icon} <b>A→G SETUP CONFIRMED</b>",
+            "",
+            f"Symbol: <b>{plan['pair']}</b>",
+            f"Timeframe: <b>{plan['timeframe']}</b>",
+            f"G time: <b>{epoch_to_utc(structure['g']['epoch'])}</b>",
+            f"G price: <b>{plan['g_price']}</b>",
+            "",
+            f"Entry Zone: <b>{plan['entry_zone_low']} - {plan['entry_zone_high']}</b>",
+            f"Stop Loss: <b>{plan['stop_loss']}</b>",
+            f"Protected B: <b>{plan['protected_B']}</b>",
+            "",
+            "Status: WAITING FOR CLOSED PULLBACK",
+            "",
+            "A candle must touch the projected A-zone "
+            "and close in the expected direction.",
+            "TP will be calculated when the trade becomes active.",
+            "",
+            f"Message time: <b>{now_utc_string()}</b>",
+        ]
+    )
+
+
+def active_message_text(structure, candles):
+    plan = active_trade_plan(
+        structure,
+        candles,
+    )
+
+    icon = (
+        "🟢"
+        if structure["direction"] == "BULLISH"
+        else "🔴"
+    )
+
+    return "\n".join(
+        [
+            f"{icon} <b>TRADE ACTIVE — ENTRY CONFIRMED</b>",
+            "",
+            f"Symbol: <b>{plan['pair']}</b>",
+            f"Timeframe: <b>{plan['timeframe']}</b>",
+            "",
+            f"Entry: <b>{plan['entry']}</b>",
+            f"Entry candle: <b>{plan['entry_time_utc']}</b>",
+            f"Stop Loss: <b>{plan['stop_loss']}</b>",
+            "",
+            f"TP1: <b>{plan['tp1']}</b> | RR {plan['rr_tp1']}",
+            f"TP2: <b>{plan['tp2']}</b> | RR {plan['rr_tp2']}",
+            f"TP3: <b>{plan['tp3']}</b> | RR {plan['rr_tp3']}",
+            "",
+            f"Entry zone: {plan['entry_zone_low']} - {plan['entry_zone_high']}",
+            "",
+            f"Message time: <b>{now_utc_string()}</b>",
+        ]
+    )
+
+
+def trade_event_text(plan, event, price, candle_epoch):
+    icon = (
+        "🛑"
+        if event == "SL"
+        else "✅"
+    )
+
+    title = (
+        "STOP LOSS HIT"
+        if event == "SL"
+        else f"{event} HIT"
+    )
+
+    return "\n".join(
+        [
+            f"{icon} <b>{title}</b>",
+            "",
+            f"Symbol: <b>{plan['pair']}</b>",
+            f"Timeframe: <b>{plan['timeframe']}</b>",
+            f"Direction: <b>{plan['direction']}</b>",
+            "",
+            f"Price: <b>{price}</b>",
+            f"Candle time: <b>{epoch_to_utc(candle_epoch)}</b>",
+            f"Message time: <b>{now_utc_string()}</b>",
+        ]
+    )
+
+
+def cancel_message_text(structure, reason):
+    return "\n".join(
+        [
+            "⚠️ <b>SETUP CANCELLED</b>",
+            "",
+            f"Symbol: <b>{structure['pair']}</b>",
+            f"Timeframe: <b>{structure['timeframe']}</b>",
+            f"Reason: <b>{reason}</b>",
+            "",
+            "No trade was activated.",
+            f"Time: <b>{now_utc_string()}</b>",
+        ]
+    )
+
+
+# ============================================================
+# TELEGRAM API
+# ============================================================
+
+def tg_send(chat_id, text, reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        return (
+            False,
+            0,
+            "TELEGRAM_BOT_TOKEN not configured",
+        )
+
+    payload = {
         "chat_id": str(chat_id),
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true",
-    }).encode()
+    }
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    telegram_request = urllib.request.Request(url, data=data)
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = int(
+            reply_to_message_id
+        )
+
+    data = urllib.parse.urlencode(
+        payload
+    ).encode()
+
+    url = (
+        "https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
+    telegram_request = urllib.request.Request(
+        url,
+        data=data,
+    )
 
     try:
-        with urllib.request.urlopen(telegram_request, timeout=15) as response:
-            body = response.read().decode("utf-8", errors="ignore")
-            payload = json.loads(body)
-            if not payload.get("ok"):
-                return False, payload.get("description", "Telegram API error")
-            return True, "ok"
+        with urllib.request.urlopen(
+            telegram_request,
+            timeout=15,
+        ) as response:
+            body = response.read().decode(
+                "utf-8",
+                errors="ignore",
+            )
+
+            result = json.loads(body)
+
+            if not result.get("ok"):
+                return (
+                    False,
+                    0,
+                    result.get(
+                        "description",
+                        "Telegram rejected message",
+                    ),
+                )
+
+            message_id = int(
+                result["result"]["message_id"]
+            )
+
+            return True, message_id, "ok"
+
     except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            payload = json.loads(detail)
-            return False, payload.get("description", f"HTTP {exc.code}")
-        except Exception:
-            return False, f"HTTP {exc.code}"
+        detail = exc.read().decode(
+            "utf-8",
+            errors="ignore",
+        )
+
+        return False, 0, detail
+
     except Exception as exc:
-        return False, str(exc)
+        return False, 0, str(exc)
 
 
-def signal_text(structure):
-    icon = "🟢" if structure["direction"] == "BULLISH" else "🔴"
+# ============================================================
+# TELEGRAM PLAN RECORDS
+# ============================================================
 
-    lines = [
-        f"{icon} <b>{structure['direction']} A→F STRUCTURE CONFIRMED</b>",
-        "",
-        f"Symbol: <b>{structure['pair']}</b>",
-        f"Timeframe: <b>{structure['timeframe']}</b>",
-        f"Detected: <b>{now_utc_string()}</b>",
-        "",
-        "━━━━━━━━━━━━━━━━━━",
-        "",
-    ]
-
-    for key in ("a", "c", "b", "d", "e", "f"):
-        point_value = structure.get(key)
-        if not point_value:
-            continue
-        lines.extend([
-            f"<b>{point_value['label']}</b> — {point_value['role']}",
-            f"Price: {point_value['price']}",
-            f"Candle time: {epoch_to_utc(point_value['epoch'])}",
-            "",
-        ])
-
-    lines.extend([
-        "━━━━━━━━━━━━━━━━━━",
-        f"Fibonacci 50%: {structure['fib50']}",
-        "",
-        "ENTRY: Manual",
-        "TP: Manual",
-        "SL: Manual",
-        "",
-        "Scanner confirmed the structure. It does not execute trades.",
-    ])
-    return "\n".join(lines)
-
-
-def alert(structure):
-    key = structure_key(structure)
+def active_telegram_users():
     with DB_LOCK:
         connection = db()
+
         try:
-            existing = connection.execute(
-                "SELECT telegram_sent FROM structures WHERE structure_key=?", (key,)
-            ).fetchone()
-            if existing and existing["telegram_sent"]:
-                return 0
-            users = connection.execute(
-                "SELECT chat_id FROM telegram_users WHERE active=1"
+            return connection.execute(
+                """
+                SELECT chat_id
+                FROM telegram_users
+                WHERE active=1
+                """
             ).fetchall()
+
         finally:
             connection.close()
 
+
+def get_trade_alert(structure_key_value, chat_id):
+    with DB_LOCK:
+        connection = db()
+
+        try:
+            return connection.execute(
+                """
+                SELECT *
+                FROM telegram_trade_alerts
+                WHERE structure_key=?
+                  AND chat_id=?
+                """,
+                (
+                    structure_key_value,
+                    str(chat_id),
+                ),
+            ).fetchone()
+
+        finally:
+            connection.close()
+
+
+def save_trade_alert(
+    structure,
+    chat_id,
+    f_message_id=0,
+    g_message_id=0,
+    active_message_id=0,
+    plan=None,
+    trade_state="WAITING_FOR_G",
+    last_event="",
+):
+    key = structure_key(structure)
+    now = int(time.time())
+
+    with DB_LOCK:
+        connection = db()
+
+        try:
+            connection.execute(
+                """
+                INSERT INTO telegram_trade_alerts(
+                    structure_key,
+                    chat_id,
+                    pair,
+                    timeframe,
+                    direction,
+                    f_message_id,
+                    g_message_id,
+                    active_message_id,
+                    plan_json,
+                    trade_state,
+                    last_event,
+                    created_epoch,
+                    updated_epoch
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(structure_key, chat_id)
+                DO UPDATE SET
+                    f_message_id=CASE
+                        WHEN excluded.f_message_id > 0
+                        THEN excluded.f_message_id
+                        ELSE telegram_trade_alerts.f_message_id
+                    END,
+                    g_message_id=CASE
+                        WHEN excluded.g_message_id > 0
+                        THEN excluded.g_message_id
+                        ELSE telegram_trade_alerts.g_message_id
+                    END,
+                    active_message_id=CASE
+                        WHEN excluded.active_message_id > 0
+                        THEN excluded.active_message_id
+                        ELSE telegram_trade_alerts.active_message_id
+                    END,
+                    plan_json=CASE
+                        WHEN excluded.plan_json IS NOT NULL
+                        THEN excluded.plan_json
+                        ELSE telegram_trade_alerts.plan_json
+                    END,
+                    trade_state=excluded.trade_state,
+                    last_event=excluded.last_event,
+                    updated_epoch=excluded.updated_epoch
+                """,
+                (
+                    key,
+                    str(chat_id),
+                    structure["pair"],
+                    structure["timeframe"],
+                    structure["direction"],
+                    int(f_message_id or 0),
+                    int(g_message_id or 0),
+                    int(active_message_id or 0),
+                    (
+                        json.dumps(
+                            plan,
+                            separators=(",", ":"),
+                        )
+                        if plan is not None
+                        else None
+                    ),
+                    trade_state,
+                    last_event,
+                    now,
+                    now,
+                ),
+            )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
+
+def send_f_notifications(structure):
+    users = active_telegram_users()
+
     if not users:
-        print("[Telegram] No active users registered")
         return 0
 
-    message = signal_text(structure)
     sent = 0
-    for user in users:
-        ok, _detail = tg_send(user["chat_id"], message)
-        if ok:
-            sent += 1
+    text = f_message_text(structure)
 
-    if sent:
-        with DB_LOCK:
-            connection = db()
-            try:
-                connection.execute(
-                    "UPDATE structures SET telegram_sent=1, updated_epoch=? WHERE structure_key=?",
-                    (int(time.time()), key)
+    for user in users:
+        chat_id = user["chat_id"]
+        existing = get_trade_alert(
+            structure_key(structure),
+            chat_id,
+        )
+
+        if existing and existing["f_message_id"]:
+            continue
+
+        ok, message_id, detail = tg_send(
+            chat_id,
+            text,
+        )
+
+        if not ok:
+            print(
+                f"[Telegram] F message failed "
+                f"for {chat_id}: {detail}"
+            )
+            continue
+
+        save_trade_alert(
+            structure,
+            chat_id,
+            f_message_id=message_id,
+            trade_state="WAITING_FOR_G",
+        )
+
+        sent += 1
+
+    return sent
+
+
+def send_g_notifications(structure, candles):
+    users = active_telegram_users()
+
+    if not users:
+        return 0
+
+    sent = 0
+    text = g_message_text(
+        structure,
+        candles,
+    )
+
+    pending_plan = pending_trade_plan(
+        structure,
+        candles,
+    )
+
+    for user in users:
+        chat_id = user["chat_id"]
+
+        existing = get_trade_alert(
+            structure_key(structure),
+            chat_id,
+        )
+
+        f_message_id = (
+            existing["f_message_id"]
+            if existing
+            else 0
+        )
+
+        g_message_id = (
+            existing["g_message_id"]
+            if existing
+            else 0
+        )
+
+        if g_message_id:
+            continue
+
+        # If F was historical or missed, create a context
+        # message first so G still has a reply chain.
+        if not f_message_id:
+            ok_f, f_message_id, detail_f = tg_send(
+                chat_id,
+                f_message_text(structure),
+            )
+
+            if not ok_f:
+                print(
+                    f"[Telegram] Context F failed "
+                    f"for {chat_id}: {detail_f}"
                 )
-                connection.commit()
-            finally:
-                connection.close()
+                continue
+
+        ok_g, g_message_id, detail_g = tg_send(
+            chat_id,
+            text,
+            reply_to_message_id=f_message_id,
+        )
+
+        if not ok_g:
+            print(
+                f"[Telegram] G message failed "
+                f"for {chat_id}: {detail_g}"
+            )
+            continue
+
+        save_trade_alert(
+            structure,
+            chat_id,
+            f_message_id=f_message_id,
+            g_message_id=g_message_id,
+            plan=pending_plan,
+            trade_state="WAITING_FOR_ENTRY",
+        )
+
+        sent += 1
+
+    return sent
+
+
+def send_active_notifications(structure, candles):
+    users = active_telegram_users()
+
+    if not users:
+        return 0
+
+    sent = 0
+    plan = active_trade_plan(
+        structure,
+        candles,
+    )
+
+    text = active_message_text(
+        structure,
+        candles,
+    )
+
+    for user in users:
+        chat_id = user["chat_id"]
+
+        existing = get_trade_alert(
+            structure_key(structure),
+            chat_id,
+        )
+
+        f_message_id = (
+            existing["f_message_id"]
+            if existing
+            else 0
+        )
+
+        g_message_id = (
+            existing["g_message_id"]
+            if existing
+            else 0
+        )
+
+        active_message_id = (
+            existing["active_message_id"]
+            if existing
+            else 0
+        )
+
+        if active_message_id:
+            continue
+
+        # Ensure the reply chain exists.
+        if not g_message_id:
+            g_sent = send_g_notifications(
+                structure,
+                candles,
+            )
+
+            if g_sent:
+                existing = get_trade_alert(
+                    structure_key(structure),
+                    chat_id,
+                )
+
+                if existing:
+                    f_message_id = existing["f_message_id"]
+                    g_message_id = existing["g_message_id"]
+
+        reply_id = (
+            g_message_id
+            or f_message_id
+            or None
+        )
+
+        ok, active_id, detail = tg_send(
+            chat_id,
+            text,
+            reply_to_message_id=reply_id,
+        )
+
+        if not ok:
+            print(
+                f"[Telegram] Active entry failed "
+                f"for {chat_id}: {detail}"
+            )
+            continue
+
+        save_trade_alert(
+            structure,
+            chat_id,
+            f_message_id=f_message_id,
+            g_message_id=g_message_id,
+            active_message_id=active_id,
+            plan=plan,
+            trade_state="ACTIVE",
+        )
+
+        sent += 1
+
+    return sent
+
+
+def send_cancel_notifications(structure, reason):
+    users = active_telegram_users()
+
+    sent = 0
+
+    for user in users:
+        chat_id = user["chat_id"]
+
+        existing = get_trade_alert(
+            structure_key(structure),
+            chat_id,
+        )
+
+        if not existing:
+            continue
+
+        if existing["trade_state"] in (
+            "CANCELLED",
+            "CLOSED",
+            "SL_HIT",
+        ):
+            continue
+
+        reply_id = (
+            existing["g_message_id"]
+            or existing["f_message_id"]
+            or None
+        )
+
+        ok, _message_id, detail = tg_send(
+            chat_id,
+            cancel_message_text(
+                structure,
+                reason,
+            ),
+            reply_to_message_id=reply_id,
+        )
+
+        if not ok:
+            print(
+                f"[Telegram] Cancellation failed "
+                f"for {chat_id}: {detail}"
+            )
+            continue
+
+        save_trade_alert(
+            structure,
+            chat_id,
+            trade_state="CANCELLED",
+            last_event=reason,
+        )
+
+        sent += 1
+
     return sent
 
 
 # ============================================================
-# DIAGNOSTICS
+# ENTRY AND TP/SL MONITORING
 # ============================================================
 
-def diagnostic_key(pair, timeframe):
-    return f"{canonical_symbol(pair)}|{str(timeframe).upper()}"
+def confirm_closed_entry(structure, candles):
+    if structure.get("stage") != "WAITING_FOR_ENTRY":
+        return False
+
+    if not structure.get("g"):
+        return False
+
+    zone_low, zone_high = structure_a_zone(
+        structure,
+        candles,
+    )
+
+    g_epoch = int(
+        structure["g"]["epoch"]
+    )
+
+    live_from = int(
+        structure.get("live_from_epoch", 0)
+    )
+
+    protected_b = float(
+        structure["b"]["price"]
+    )
+
+    for candle in candles:
+        candle_epoch = int(
+            candle["epoch"]
+        )
+
+        if candle_epoch <= g_epoch:
+            continue
+
+        # Historical context is allowed for pattern analysis,
+        # but not for generating a new live entry.
+        if live_from and candle_epoch <= live_from:
+            continue
+
+        if structure["direction"] == "BULLISH":
+            touched_zone = (
+                candle["low"] <= zone_high
+                and candle["high"] >= zone_low
+            )
+
+            rejection_close = (
+                candle["close"] > zone_high
+                and candle["close"] > candle["open"]
+            )
+
+            broke_b = candle["low"] <= protected_b
+
+        else:
+            touched_zone = (
+                candle["high"] >= zone_low
+                and candle["low"] <= zone_high
+            )
+
+            rejection_close = (
+                candle["close"] < zone_low
+                and candle["close"] < candle["open"]
+            )
+
+            broke_b = candle["high"] >= protected_b
+
+        if broke_b:
+            mark_invalid(
+                structure,
+                "protected_B_broken_before_entry",
+            )
+            return False
+
+        if touched_zone and rejection_close:
+            structure["entry_price"] = float(
+                candle["close"]
+            )
+
+            structure["entry_epoch"] = candle_epoch
+
+            set_stage(
+                structure,
+                "ACTIVE",
+            )
+
+            return True
+
+    return False
 
 
-def diagnostic_started(pair, timeframe):
-    key = diagnostic_key(pair, timeframe)
-    SCANNER_DIAGNOSTICS["last_check"][key] = {
-        "status": "started",
-        "time": int(time.time()),
-        "time_utc": now_utc_string(),
-    }
+def monitor_trade_alerts(pair, timeframe, candles):
+    pair = canonical_symbol(pair)
+    timeframe = str(timeframe).upper()
+
+    with DB_LOCK:
+        connection = db()
+
+        try:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM telegram_trade_alerts
+                WHERE pair=?
+                  AND timeframe=?
+                  AND trade_state='ACTIVE'
+                """,
+                (
+                    pair,
+                    timeframe,
+                ),
+            ).fetchall()
+
+        finally:
+            connection.close()
+
+    if not rows:
+        return 0
+
+    total_events = 0
+
+    for row in rows:
+        if not row["plan_json"]:
+            continue
+
+        try:
+            plan = json.loads(
+                row["plan_json"]
+            )
+        except Exception:
+            continue
+
+        entry_epoch = int(
+            plan.get("entry_epoch", 0)
+        )
+
+        direction = plan["direction"]
+        events = []
+        close_trade = False
+
+        for candle in candles:
+            candle_epoch = int(
+                candle["epoch"]
+            )
+
+            if candle_epoch <= entry_epoch:
+                continue
+
+            high = float(candle["high"])
+            low = float(candle["low"])
+
+            if direction == "BULLISH":
+                # Conservative: SL first if both are touched.
+                if (
+                    not plan.get("sl_hit")
+                    and low <= float(plan["stop_loss"])
+                ):
+                    plan["sl_hit"] = True
+                    plan["trade_state"] = "SL_HIT"
+                    events.append(
+                        (
+                            "SL",
+                            plan["stop_loss"],
+                            candle_epoch,
+                        )
+                    )
+                    close_trade = True
+                    break
+
+                if (
+                    not plan.get("tp1_hit")
+                    and high >= float(plan["tp1"])
+                ):
+                    plan["tp1_hit"] = True
+                    events.append(
+                        (
+                            "TP1",
+                            plan["tp1"],
+                            candle_epoch,
+                        )
+                    )
+
+                if (
+                    not plan.get("tp2_hit")
+                    and high >= float(plan["tp2"])
+                ):
+                    plan["tp2_hit"] = True
+                    events.append(
+                        (
+                            "TP2",
+                            plan["tp2"],
+                            candle_epoch,
+                        )
+                    )
+
+                if (
+                    not plan.get("tp3_hit")
+                    and high >= float(plan["tp3"])
+                ):
+                    plan["tp3_hit"] = True
+                    plan["trade_state"] = "TP3_HIT"
+                    events.append(
+                        (
+                            "TP3",
+                            plan["tp3"],
+                            candle_epoch,
+                        )
+                    )
+                    close_trade = True
+                    break
+
+            else:
+                if (
+                    not plan.get("sl_hit")
+                    and high >= float(plan["stop_loss"])
+                ):
+                    plan["sl_hit"] = True
+                    plan["trade_state"] = "SL_HIT"
+                    events.append(
+                        (
+                            "SL",
+                            plan["stop_loss"],
+                            candle_epoch,
+                        )
+                    )
+                    close_trade = True
+                    break
+
+                if (
+                    not plan.get("tp1_hit")
+                    and low <= float(plan["tp1"])
+                ):
+                    plan["tp1_hit"] = True
+                    events.append(
+                        (
+                            "TP1",
+                            plan["tp1"],
+                            candle_epoch,
+                        )
+                    )
+
+                if (
+                    not plan.get("tp2_hit")
+                    and low <= float(plan["tp2"])
+                ):
+                    plan["tp2_hit"] = True
+                    events.append(
+                        (
+                            "TP2",
+                            plan["tp2"],
+                            candle_epoch,
+                        )
+                    )
+
+                if (
+                    not plan.get("tp3_hit")
+                    and low <= float(plan["tp3"])
+                ):
+                    plan["tp3_hit"] = True
+                    plan["trade_state"] = "TP3_HIT"
+                    events.append(
+                        (
+                            "TP3",
+                            plan["tp3"],
+                            candle_epoch,
+                        )
+                    )
+                    close_trade = True
+                    break
+
+        if not events:
+            continue
+
+        active_message_id = row["active_message_id"]
+
+        for event, price, candle_epoch in events:
+            ok, _message_id, detail = tg_send(
+                row["chat_id"],
+                trade_event_text(
+                    plan,
+                    event,
+                    price,
+                    candle_epoch,
+                ),
+                reply_to_message_id=active_message_id,
+            )
+
+            if ok:
+                total_events += 1
+            else:
+                print(
+                    f"[Telegram] Trade event failed: {detail}"
+                )
+
+        if close_trade:
+            plan["trade_state"] = (
+                "CLOSED"
+                if plan.get("tp3_hit")
+                else "SL_HIT"
+            )
+
+        with DB_LOCK:
+            connection = db()
+
+            try:
+                connection.execute(
+                    """
+                    UPDATE telegram_trade_alerts
+                    SET plan_json=?,
+                        trade_state=?,
+                        last_event=?,
+                        updated_epoch=?
+                    WHERE id=?
+                    """,
+                    (
+                        json.dumps(
+                            plan,
+                            separators=(",", ":"),
+                        ),
+                        plan["trade_state"],
+                        events[-1][0],
+                        int(time.time()),
+                        row["id"],
+                    ),
+                )
+
+                connection.commit()
+
+            finally:
+                connection.close()
+
+    return total_events
 
 
-def diagnostic_success(pair, timeframe, result):
-    key = diagnostic_key(pair, timeframe)
-    SCANNER_DIAGNOSTICS["last_success"][key] = {
-        "time": int(time.time()),
-        "time_utc": now_utc_string(),
-        "latest_closed_epoch": result.get("latest_closed_epoch"),
-        "completed_now": result.get("completed_now", 0),
-        "active_structures": result.get("active_structures", 0),
-        "skipped": result.get("skipped", False),
-    }
-    SCANNER_DIAGNOSTICS["scan_count"][key] = SCANNER_DIAGNOSTICS["scan_count"].get(key, 0) + 1
-    SCANNER_DIAGNOSTICS["last_error"].pop(key, None)
+# ============================================================
+# NOTIFICATION PROCESSING
+# ============================================================
 
+def process_structure_events(
+    structure,
+    previous_stage,
+    previous_f_epoch,
+    previous_g_epoch,
+    candles,
+):
+    notifications = 0
 
-def diagnostic_error(pair, timeframe, error):
-    key = diagnostic_key(pair, timeframe)
-    SCANNER_DIAGNOSTICS["last_error"][key] = {
-        "time": int(time.time()),
-        "time_utc": now_utc_string(),
-        "error": str(error),
-    }
+    live_from = int(
+        structure.get("live_from_epoch", 0)
+    )
+
+    f_epoch = int(
+        structure["f"]["epoch"]
+    ) if structure.get("f") else 0
+
+    g_epoch = int(
+        structure["g"]["epoch"]
+    ) if structure.get("g") else 0
+
+    # F message only when F is newly live.
+    if (
+        structure.get("stage") in (
+            "WAITING_FOR_G",
+            "WAITING_FOR_ENTRY",
+            "ACTIVE",
+        )
+        and f_epoch > live_from
+        and f_epoch != previous_f_epoch
+    ):
+        notifications += send_f_notifications(
+            structure
+        )
+
+    # G message contains Entry Zone + SL.
+    if (
+        structure.get("stage") in (
+            "WAITING_FOR_ENTRY",
+            "ACTIVE",
+        )
+        and g_epoch > live_from
+        and g_epoch != previous_g_epoch
+    ):
+        notifications += send_g_notifications(
+            structure,
+            candles,
+        )
+
+    # If an entry was confirmed by a closed A-zone rejection,
+    # send actual Entry + TP1/TP2/TP3.
+    if (
+        structure.get("stage") == "ACTIVE"
+        and structure.get("entry_epoch", 0) > live_from
+    ):
+        notifications += send_active_notifications(
+            structure,
+            candles,
+        )
+
+    return notifications
 
 
 # ============================================================
 # SCAN ENGINE
 # ============================================================
 
-def run_scan(pair, timeframe, candles, strength, bos_mode, min_atr, expansion_atr,
-             displacement_atr, min_bars=1, fib_ratio=0.5):
-
+def run_scan(
+    pair,
+    timeframe,
+    candles,
+    strength,
+    bos_mode,
+    min_atr,
+    expansion_atr,
+    displacement_atr,
+    min_bars=1,
+    fib_ratio=0.5,
+):
     pair = canonical_symbol(pair)
-    if not pair:
-        raise ValueError("Unsupported pair")
-
     timeframe = str(timeframe).upper()
 
     latest_epoch = candles[-1]["epoch"]
     completed_now = []
+    trade_events_now = 0
 
-    memory = structures_for(pair, timeframe)
+    memory = structures_for(
+        pair,
+        timeframe,
+    )
 
-    for direction in ("BULLISH", "BEARISH"):
+    # Keep the newest active candidate per direction.
+    for direction in (
+        "BULLISH",
+        "BEARISH",
+    ):
         active = [
-            s for s in memory
-            if s["direction"] == direction and s["state"] not in ("COMPLETE", "DISCARDED")
+            item
+            for item in memory
+            if item["direction"] == direction
+            and item["state"] not in (
+                "COMPLETE",
+                "INVALID",
+                "CLOSED",
+            )
         ]
-        active.sort(key=lambda s: s["b"]["epoch"], reverse=True)
+
+        active.sort(
+            key=lambda item: item["b"]["epoch"],
+            reverse=True,
+        )
+
         for obsolete in active[1:]:
             delete_structure(obsolete)
 
-    memory = structures_for(pair, timeframe)
+    memory = structures_for(
+        pair,
+        timeframe,
+    )
 
+    # Advance existing candidates.
     for structure in list(memory):
-        if structure["state"] in ("COMPLETE", "DISCARDED"):
+        if structure["state"] in (
+            "INVALID",
+            "CLOSED",
+        ):
             continue
-        previous_state = structure["state"]
+
+        previous_stage = structure.get(
+            "stage",
+            structure["state"],
+        )
+
+        previous_f_epoch = int(
+            structure["f"]["epoch"]
+        ) if structure.get("f") else 0
+
+        previous_g_epoch = int(
+            structure["g"]["epoch"]
+        ) if structure.get("g") else 0
+
         if not structure.get("live_from_epoch"):
             structure["live_from_epoch"] = latest_epoch
-        structure = advance(
-            structure=structure, candles=candles, bos_mode=bos_mode,
-            expansion_atr=expansion_atr, displacement_atr=displacement_atr,
-            allow_historical_f=False, swing_strength=strength,
-            min_atr_move=min_atr, fib_ratio=fib_ratio
+
+        structure = advance_structure(
+            structure=structure,
+            candles=candles,
+            bos_mode=bos_mode,
+            expansion_atr=expansion_atr,
+            displacement_atr=displacement_atr,
+            swing_strength=strength,
+            min_atr_move=min_atr,
+            fib_ratio=fib_ratio,
         )
-        if structure["state"] == "DISCARDED":
+
+        # After G, wait for a CLOSED A-zone rejection candle.
+        if structure.get("stage") == "WAITING_FOR_ENTRY":
+            confirm_closed_entry(
+                structure,
+                candles,
+            )
+
+        if structure["state"] == "INVALID":
+            # Send cancellation only for a live plan.
+            if (
+                structure.get("g")
+                and structure.get("g", {}).get("epoch", 0)
+                > structure.get("live_from_epoch", 0)
+            ):
+                send_cancel_notifications(
+                    structure,
+                    structure.get(
+                        "discard_reason",
+                        "structure invalidated",
+                    ),
+                )
+
             delete_structure(structure)
             continue
-        save(structure)
-        if previous_state != "COMPLETE" and structure["state"] == "COMPLETE":
-            sent = alert(structure)
-            structure["telegram_sent_now"] = bool(sent)
+
+        if (
+            previous_stage != "COMPLETE"
+            and structure.get("stage") == "COMPLETE"
+        ):
             completed_now.append(structure)
 
-    memory = structures_for(pair, timeframe)
-    known_keys = {s["structure_key"] for s in memory}
+        save(structure)
 
-    for direction in ("BULLISH", "BEARISH"):
-        has_active = any(
-            s["direction"] == direction and s["state"] not in ("COMPLETE", "DISCARDED")
-            for s in memory
+        trade_events_now += process_structure_events(
+            structure,
+            previous_stage,
+            previous_f_epoch,
+            previous_g_epoch,
+            candles,
         )
+
+        save(structure)
+
+    memory = structures_for(
+        pair,
+        timeframe,
+    )
+
+    known_keys = {
+        item["structure_key"]
+        for item in memory
+    }
+
+    # Discover candidates if direction has no active one.
+    for direction in (
+        "BULLISH",
+        "BEARISH",
+    ):
+        has_active = any(
+            item["direction"] == direction
+            and item["state"] not in (
+                "COMPLETE",
+                "INVALID",
+                "CLOSED",
+            )
+            for item in memory
+        )
+
         if has_active:
             continue
+
         candidates = discover_abc(
-            candles=candles, pair=pair, timeframe=timeframe,
-            direction=direction, strength=strength, min_atr=min_atr, min_bars=min_bars
+            candles=candles,
+            pair=pair,
+            timeframe=timeframe,
+            direction=direction,
+            strength=strength,
+            min_atr=min_atr,
+            min_bars=min_bars,
         )
-        candidates.sort(key=lambda s: s["b"]["epoch"], reverse=True)
+
+        candidates.sort(
+            key=lambda item: item["b"]["epoch"],
+            reverse=True,
+        )
+
         for candidate in candidates:
             key = structure_key(candidate)
+
             if key in known_keys:
                 continue
+
+            # Historical context can be used to find F and G,
+            # but live notifications require epochs after this boundary.
             candidate["live_from_epoch"] = latest_epoch
-            candidate = advance(
-                structure=candidate, candles=candles, bos_mode=bos_mode,
-                expansion_atr=expansion_atr, displacement_atr=displacement_atr,
-                allow_historical_f=False, swing_strength=strength,
-                min_atr_move=min_atr, fib_ratio=fib_ratio
+            candidate["context_only"] = True
+
+            previous_stage = candidate["stage"]
+
+            candidate = advance_structure(
+                structure=candidate,
+                candles=candles,
+                bos_mode=bos_mode,
+                expansion_atr=expansion_atr,
+                displacement_atr=displacement_atr,
+                swing_strength=strength,
+                min_atr_move=min_atr,
+                fib_ratio=fib_ratio,
             )
-            if candidate["state"] == "DISCARDED":
+
+            if candidate.get("stage") == "WAITING_FOR_ENTRY":
+                confirm_closed_entry(
+                    candidate,
+                    candles,
+                )
+
+            if candidate["state"] == "INVALID":
                 continue
+
             save(candidate)
             known_keys.add(key)
             memory.append(candidate)
+
+            # Historical F/G are context only and do not create an
+            # old alert immediately.
             break
 
-    final_signals = structures_for(pair, timeframe)
-    active_count = sum(1 for s in final_signals if s["state"] not in ("COMPLETE", "DISCARDED"))
+    # Monitor active trade plans for TP/SL.
+    for target in (
+        database_scanner_targets()
+    ):
+        target_pair = target["pair"]
+        target_tf = target["timeframe"]
+
+        if (
+            target_pair != pair
+            or target_tf != timeframe
+        ):
+            continue
+
+        trade_events_now += monitor_trade_alerts(
+            pair,
+            timeframe,
+            candles,
+        )
+
+    final_signals = structures_for(
+        pair,
+        timeframe,
+    )
+
+    active_count = sum(
+        1
+        for item in final_signals
+        if item["state"] not in (
+            "COMPLETE",
+            "INVALID",
+            "CLOSED",
+        )
+    )
 
     return {
         "pair": pair,
         "timeframe": timeframe,
         "scan_mode": "DUAL_DIRECTION",
+        "chronological_order": "A -> C -> B -> D -> E -> F -> G",
         "memory_enabled": True,
-        "chronological_order": "A -> C -> B -> D -> E -> F",
-        "chronological_locking": True,
-        "historical_f_alerts_suppressed": True,
         "active_structures": active_count,
         "stored_structures": len(final_signals),
         "completed_now": len(completed_now),
+        "trade_events_now": trade_events_now,
         "signals": final_signals,
         "completed_signals": completed_now,
     }
@@ -1274,47 +3530,270 @@ def run_scan(pair, timeframe, candles, strength, bos_mode, min_atr, expansion_at
 
 def environment_list(name, default):
     raw = os.environ.get(name, default)
-    return [v.strip() for v in raw.split(",") if v.strip()]
+
+    return [
+        value.strip()
+        for value in raw.split(",")
+        if value.strip()
+    ]
 
 
 def scanner_settings():
-    environment_pairs = unique_values([
-        canonical_symbol(p) for p in environment_list("SCANNER_PAIRS", "R_100")
-    ])
-    environment_timeframes = unique_values([
-        tf.upper() for tf in environment_list("SCANNER_TIMEFRAMES", "M15")
-        if tf.upper() in TIMEFRAME_MAP
-    ])
-    bos_mode = os.environ.get("SCANNER_BOS", "body").lower()
-    if bos_mode not in ("body", "wick"):
-        bos_mode = "body"
+    pairs = unique_values(
+        [
+            canonical_symbol(pair)
+            for pair in environment_list(
+                "SCANNER_PAIRS",
+                "R_100",
+            )
+            if canonical_symbol(pair)
+        ]
+    )
+
+    timeframes = unique_values(
+        [
+            timeframe.upper()
+            for timeframe in environment_list(
+                "SCANNER_TIMEFRAMES",
+                "M15",
+            )
+            if timeframe.upper() in TIMEFRAME_MAP
+        ]
+    )
+
+    bos = os.environ.get(
+        "SCANNER_BOS",
+        "body",
+    ).lower()
+
+    if bos not in (
+        "body",
+        "wick",
+    ):
+        bos = "body"
 
     return {
-        "enabled": os.environ.get("SCANNER_ENABLED", "true").lower() in ("1", "true", "yes", "on"),
-        "pairs": environment_pairs or ["R_100"],
-        "timeframes": environment_timeframes or ["M15"],
-        "interval": max(5, int(os.environ.get("SCANNER_INTERVAL_SECONDS", str(DEFAULT_SCANNER_INTERVAL)))),
-        "count": max(100, min(1000, int(os.environ.get("SCANNER_CANDLE_COUNT", str(DEFAULT_CANDLE_COUNT))))),
-        "strength": max(1, int(os.environ.get("SCANNER_STRENGTH", "3"))),
-        "bos": bos_mode,
-        "min_atr": max(0.0, float(os.environ.get("SCANNER_MIN_ATR_MOVE", "0.25"))),
-        "expansion_atr": max(0.0, float(os.environ.get("SCANNER_MIN_EXPANSION_ATR", "0.5"))),
-        "displacement_atr": max(0.0, float(os.environ.get("SCANNER_DISPLACEMENT_ATR", "1.0"))),
-        "min_bars": max(1, int(os.environ.get("SCANNER_MIN_BARS", "1"))),
-        "fib_ratio": max(0.0, min(1.0, float(os.environ.get("SCANNER_FIB_THRESHOLD", "0.5")))),
+        "enabled": os.environ.get(
+            "SCANNER_ENABLED",
+            "true",
+        ).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ),
+        "pairs": pairs or ["R_100"],
+        "timeframes": timeframes or ["M15"],
+        "interval": max(
+            5,
+            int(
+                os.environ.get(
+                    "SCANNER_INTERVAL_SECONDS",
+                    str(DEFAULT_SCANNER_INTERVAL),
+                )
+            ),
+        ),
+        "count": max(
+            100,
+            min(
+                1000,
+                int(
+                    os.environ.get(
+                        "SCANNER_CANDLE_COUNT",
+                        str(DEFAULT_CANDLE_COUNT),
+                    )
+                ),
+            ),
+        ),
+        "strength": max(
+            1,
+            int(
+                os.environ.get(
+                    "SCANNER_STRENGTH",
+                    "3",
+                )
+            ),
+        ),
+        "bos": bos,
+        "min_atr": max(
+            0.0,
+            float(
+                os.environ.get(
+                    "SCANNER_MIN_ATR_MOVE",
+                    "0.25",
+                )
+            ),
+        ),
+        "expansion_atr": max(
+            0.0,
+            float(
+                os.environ.get(
+                    "SCANNER_MIN_EXPANSION_ATR",
+                    "0.5",
+                )
+            ),
+        ),
+        "displacement_atr": max(
+            0.0,
+            float(
+                os.environ.get(
+                    "SCANNER_DISPLACEMENT_ATR",
+                    "1.0",
+                )
+            ),
+        ),
+        "min_bars": max(
+            1,
+            int(
+                os.environ.get(
+                    "SCANNER_MIN_BARS",
+                    "1",
+                )
+            ),
+        ),
+        "fib_ratio": max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.environ.get(
+                        "SCANNER_FIB_THRESHOLD",
+                        "0.5",
+                    )
+                ),
+            ),
+        ),
     }
 
 
+def database_scanner_targets():
+    try:
+        with DB_LOCK:
+            connection = db()
+
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT pair, timeframe
+                    FROM scanner_targets
+                    WHERE active=1
+                    ORDER BY pair, timeframe
+                    """
+                ).fetchall()
+
+            finally:
+                connection.close()
+
+        return [
+            {
+                "pair": row["pair"],
+                "timeframe": row["timeframe"],
+            }
+            for row in rows
+        ]
+
+    except Exception as exc:
+        print(
+            f"[Scanner] Target lookup failed: {exc}"
+        )
+        return []
+
+
 def effective_scanner_targets(config=None):
-    stored_targets = database_scanner_targets()
-    if stored_targets:
-        return stored_targets
+    stored = database_scanner_targets()
+
+    if stored:
+        return stored
+
     config = config or scanner_settings()
+
     return [
-        {"pair": pair, "timeframe": tf}
+        {
+            "pair": pair,
+            "timeframe": timeframe,
+        }
         for pair in config["pairs"]
-        for tf in config["timeframes"]
+        for timeframe in config["timeframes"]
     ]
+
+
+def replace_scanner_targets(pairs, timeframes):
+    canonical_pairs = unique_values(
+        [
+            canonical_symbol(pair)
+            for pair in pairs
+            if canonical_symbol(pair)
+        ]
+    )
+
+    canonical_timeframes = unique_values(
+        [
+            timeframe.upper()
+            for timeframe in timeframes
+            if timeframe.upper() in TIMEFRAME_MAP
+        ]
+    )
+
+    if not canonical_pairs:
+        raise ValueError(
+            "At least one valid pair is required"
+        )
+
+    if not canonical_timeframes:
+        raise ValueError(
+            "At least one supported timeframe is required"
+        )
+
+    targets = [
+        {
+            "pair": pair,
+            "timeframe": timeframe,
+        }
+        for pair in canonical_pairs
+        for timeframe in canonical_timeframes
+    ]
+
+    if len(targets) > 50:
+        raise ValueError(
+            "Maximum 50 pair/timeframe combinations"
+        )
+
+    now = int(time.time())
+
+    with DB_LOCK:
+        connection = db()
+
+        try:
+            connection.execute(
+                "DELETE FROM scanner_targets"
+            )
+
+            for target in targets:
+                connection.execute(
+                    """
+                    INSERT INTO scanner_targets(
+                        pair,
+                        timeframe,
+                        active,
+                        created_epoch,
+                        updated_epoch
+                    )
+                    VALUES(?,?,1,?,?)
+                    """,
+                    (
+                        target["pair"],
+                        target["timeframe"],
+                        now,
+                        now,
+                    ),
+                )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
+    return targets
 
 
 # ============================================================
@@ -1324,96 +3803,250 @@ def effective_scanner_targets(config=None):
 def continuous_scan_once(pair, timeframe, config):
     pair = canonical_symbol(pair)
     timeframe = str(timeframe).upper()
-    key = diagnostic_key(pair, timeframe)
-    diagnostic_started(pair, timeframe)
+
+    diagnostic_started(
+        pair,
+        timeframe,
+    )
 
     if timeframe not in TIMEFRAME_MAP:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
+        raise ValueError(
+            f"Unsupported timeframe: {timeframe}"
+        )
 
     granularity = TIMEFRAME_MAP[timeframe]
-    raw = get_candles(pair, granularity, config["count"])
-    candles = closed_candles(normalize(raw), granularity)
 
-    minimum_required = max(50, config["strength"] * 4)
+    raw = get_candles(
+        pair,
+        granularity,
+        config["count"],
+    )
+
+    candles = closed_candles(
+        normalize(raw),
+        granularity,
+    )
+
+    minimum_required = max(
+        50,
+        config["strength"] * 4,
+    )
+
     if len(candles) < minimum_required:
         result = {
-            "ok": False, "reason": "not_enough_closed_candles",
-            "pair": pair, "timeframe": timeframe, "candles": len(candles),
+            "ok": False,
+            "reason": "not_enough_closed_candles",
+            "pair": pair,
+            "timeframe": timeframe,
+            "candles": len(candles),
         }
-        diagnostic_error(pair, timeframe, f"Not enough closed candles: {len(candles)}")
+
+        diagnostic_error(
+            pair,
+            timeframe,
+            f"Not enough closed candles: {len(candles)}",
+        )
+
         return result
 
     latest_epoch = candles[-1]["epoch"]
+    key = f"{pair}|{timeframe}"
+
     if SCANNER_LAST.get(key) == latest_epoch:
+        events = monitor_trade_alerts(
+            pair,
+            timeframe,
+            candles,
+        )
+
         result = {
-            "ok": True, "pair": pair, "timeframe": timeframe, "skipped": True,
-            "latest_closed_epoch": latest_epoch, "completed_now": 0, "active_structures": None,
+            "ok": True,
+            "pair": pair,
+            "timeframe": timeframe,
+            "skipped": True,
+            "latest_closed_epoch": latest_epoch,
+            "completed_now": 0,
+            "trade_events_now": events,
+            "active_structures": None,
         }
-        diagnostic_success(pair, timeframe, result)
+
+        diagnostic_success(
+            pair,
+            timeframe,
+            result,
+        )
+
         return result
 
     result = run_scan(
-        pair=pair, timeframe=timeframe, candles=candles,
-        strength=config["strength"], bos_mode=config["bos"],
-        min_atr=config["min_atr"], expansion_atr=config["expansion_atr"],
-        displacement_atr=config["displacement_atr"], min_bars=config["min_bars"],
+        pair=pair,
+        timeframe=timeframe,
+        candles=candles,
+        strength=config["strength"],
+        bos_mode=config["bos"],
+        min_atr=config["min_atr"],
+        expansion_atr=config["expansion_atr"],
+        displacement_atr=config["displacement_atr"],
+        min_bars=config["min_bars"],
         fib_ratio=config["fib_ratio"],
     )
+
     SCANNER_LAST[key] = latest_epoch
-    result.update({"ok": True, "skipped": False, "latest_closed_epoch": latest_epoch})
-    diagnostic_success(pair, timeframe, result)
+
+    result.update(
+        {
+            "ok": True,
+            "skipped": False,
+            "latest_closed_epoch": latest_epoch,
+        }
+    )
+
+    diagnostic_success(
+        pair,
+        timeframe,
+        result,
+    )
+
     return result
 
 
 def scanner_loop():
-    initial_config = scanner_settings()
-    print(f"[Scanner] Continuous live scanner started (interval={initial_config['interval']}s)")
+    config = scanner_settings()
+
+    print(
+        "[Scanner] Started "
+        f"(interval={config['interval']} seconds)"
+    )
 
     while not SCANNER_STOP.is_set():
         cycle_started = time.time()
+
         try:
             config = scanner_settings()
+
             if not config["enabled"]:
-                print("[Scanner] Disabled by SCANNER_ENABLED.")
-            elif not SCAN_LOCK.acquire(blocking=False):
-                print("[Scanner] Previous cycle still running; skipping.")
+                print(
+                    "[Scanner] Disabled"
+                )
+
+            elif not SCAN_LOCK.acquire(
+                blocking=False
+            ):
+                print(
+                    "[Scanner] Previous cycle still running"
+                )
+
             else:
                 try:
-                    targets = effective_scanner_targets(config)
+                    targets = effective_scanner_targets(
+                        config
+                    )
+
                     for target in targets:
                         if SCANNER_STOP.is_set():
                             break
+
                         pair = target["pair"]
                         timeframe = target["timeframe"]
+
                         try:
-                            result = continuous_scan_once(pair, timeframe, config)
-                            if result.get("completed_now", 0):
-                                print(f"[Scanner] {pair} {timeframe}: {result['completed_now']} new signal(s)")
+                            result = continuous_scan_once(
+                                pair,
+                                timeframe,
+                                config,
+                            )
+
+                            if result.get(
+                                "completed_now",
+                                0,
+                            ):
+                                print(
+                                    f"[Scanner] {pair} "
+                                    f"{timeframe}: "
+                                    f"{result['completed_now']} "
+                                    "new structure(s)"
+                                )
+
+                            elif result.get(
+                                "trade_events_now",
+                                0,
+                            ):
+                                print(
+                                    f"[Scanner] {pair} "
+                                    f"{timeframe}: "
+                                    f"{result['trade_events_now']} "
+                                    "trade event(s)"
+                                )
+
                             else:
-                                print(f"[Scanner] {pair} {timeframe}: OK (epoch={result.get('latest_closed_epoch')}, skipped={result.get('skipped', False)})")
+                                print(
+                                    f"[Scanner] {pair} "
+                                    f"{timeframe}: OK "
+                                    f"(skipped="
+                                    f"{result.get('skipped')})"
+                                )
+
                         except Exception as exc:
-                            diagnostic_error(pair, timeframe, exc)
-                            print(f"[Scanner] {pair} {timeframe} ERROR: {exc}")
+                            diagnostic_error(
+                                pair,
+                                timeframe,
+                                exc,
+                            )
+
+                            print(
+                                f"[Scanner] {pair} "
+                                f"{timeframe} ERROR: "
+                                f"{exc}"
+                            )
+
                 finally:
                     SCAN_LOCK.release()
+
         except Exception as exc:
-            print(f"[Scanner] OUTER LOOP ERROR: {exc}")
+            print(
+                f"[Scanner] OUTER ERROR: {exc}"
+            )
 
         elapsed = time.time() - cycle_started
         config = scanner_settings()
-        wait_seconds = max(1, config["interval"] - int(elapsed))
-        print(f"[Scanner] Next cycle in {wait_seconds}s.")
-        SCANNER_STOP.wait(wait_seconds)
 
-    print("[Scanner] Continuous live scanner stopped.")
+        wait_seconds = max(
+            1,
+            config["interval"]
+            - int(elapsed),
+        )
+
+        print(
+            f"[Scanner] Next cycle in "
+            f"{wait_seconds}s"
+        )
+
+        SCANNER_STOP.wait(
+            wait_seconds
+        )
+
+    print(
+        "[Scanner] Stopped"
+    )
 
 
 def start_scanner():
     global SCANNER_THREAD
-    if SCANNER_THREAD and SCANNER_THREAD.is_alive():
+
+    if (
+        SCANNER_THREAD
+        and SCANNER_THREAD.is_alive()
+    ):
         return False
+
     SCANNER_STOP.clear()
-    SCANNER_THREAD = threading.Thread(target=scanner_loop, name="freedom-live-scanner", daemon=True)
+
+    SCANNER_THREAD = threading.Thread(
+        target=scanner_loop,
+        name="trade-signal-scanner",
+        daemon=True,
+    )
+
     SCANNER_THREAD.start()
     return True
 
@@ -1424,19 +4057,31 @@ def stop_scanner():
 
 
 # ============================================================
-# ADMIN HELPERS
+# AUTH
 # ============================================================
 
 def optional_admin_authorized():
     if not ADMIN_KEY:
         return True
-    return request.headers.get("X-Admin-Key") == ADMIN_KEY
+
+    return (
+        request.headers.get(
+            "X-Admin-Key"
+        )
+        == ADMIN_KEY
+    )
 
 
 def strict_admin_authorized():
     if not ADMIN_KEY:
         return True
-    return request.headers.get("X-Admin-Key") == ADMIN_KEY
+
+    return (
+        request.headers.get(
+            "X-Admin-Key"
+        )
+        == ADMIN_KEY
+    )
 
 
 # ============================================================
@@ -1445,402 +4090,899 @@ def strict_admin_authorized():
 
 @app.get("/")
 def home_api():
-    return "Freedom Structure Scanner is running. Order: A → C → B → D → E → F ✅"
+    return (
+        "TradeSignal scanner is running. "
+        "A → C → B → D → E → F → G"
+    )
 
 
 @app.get("/health")
 def health_api():
     config = scanner_settings()
+
     try:
-        targets = effective_scanner_targets(config)
+        targets = effective_scanner_targets(
+            config
+        )
     except Exception:
         targets = []
 
     try:
         with DB_LOCK:
             connection = db()
+
             try:
-                telegram_users = connection.execute(
-                    "SELECT COUNT(*) FROM telegram_users WHERE active=1"
-                ).fetchone()[0]
-                stored_structures = connection.execute(
+                structures_count = connection.execute(
                     "SELECT COUNT(*) FROM structures"
                 ).fetchone()[0]
+
+                users_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM telegram_users
+                    WHERE active=1
+                    """
+                ).fetchone()[0]
+
+                plans_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM telegram_trade_alerts
+                    WHERE trade_state='ACTIVE'
+                    """
+                ).fetchone()[0]
+
             finally:
                 connection.close()
-    except Exception as exc:
-        print(f"[Health] database read failed: {exc}")
-        telegram_users = 0
-        stored_structures = 0
 
-    return jsonify({
-        "ok": True,
-        "engine": "Freedom Structure Scanner V7",
-        "server_time_utc": now_utc_string(),
-        "chronological_order": "A -> C -> B -> D -> E -> F",
-        "memory_discard": True,
-        "database_path": os.path.abspath(DB_PATH),
-        "database_persistent": os.path.abspath(DB_PATH).startswith("/var/data"),
-        "stored_structures": stored_structures,
-        "telegram_users": telegram_users,
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
-        "admin_key_configured": bool(ADMIN_KEY),
-        "continuous_scanner": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive() and not SCANNER_STOP.is_set()),
-        "scanner_interval_seconds": config["interval"],
-        "scanner_targets": targets,
-    })
+    except Exception as exc:
+        print(f"[Health] DB error: {exc}")
+        structures_count = 0
+        users_count = 0
+        plans_count = 0
+
+    return jsonify(
+        {
+            "ok": True,
+            "engine": "TradeSignal Structure Scanner V9",
+            "server_time_utc": now_utc_string(),
+            "chronological_order": (
+                "A -> C -> B -> D -> E -> F -> G"
+            ),
+            "database_path": DB_PATH,
+            "database_persistent": DB_IS_PERSISTENT,
+            "stored_structures": structures_count,
+            "telegram_users": users_count,
+            "active_trade_plans": plans_count,
+            "telegram_configured": bool(
+                TELEGRAM_BOT_TOKEN
+            ),
+            "continuous_scanner": bool(
+                SCANNER_THREAD
+                and SCANNER_THREAD.is_alive()
+                and not SCANNER_STOP.is_set()
+            ),
+            "scanner_interval_seconds": (
+                config["interval"]
+            ),
+            "g_min_reach": G_MIN_REACH,
+            "targets": targets,
+        }
+    )
+
+
+@app.get("/symbols")
+def symbols_api():
+    return jsonify(
+        {
+            "ok": True,
+            "symbols": sorted(
+                set(SYMBOL_MAP.values())
+            ),
+        }
+    )
 
 
 @app.get("/symbols/resolve")
 def resolve_symbol_api():
-    raw = request.args.get("pair", "")
+    raw = request.args.get(
+        "pair",
+        "",
+    )
+
     resolved = canonical_symbol(raw)
-    return jsonify({
-        "input": raw,
-        "deriv_symbol": resolved,
-        "supported": bool(resolved),
-    })
 
-
-@app.get("/symbols")
-def list_symbols_api():
-    return jsonify({
-        "ok": True,
-        "symbols": sorted(set(SYMBOL_MAP.values())),
-    })
+    return jsonify(
+        {
+            "input": raw,
+            "deriv_symbol": resolved,
+            "supported": bool(resolved),
+        }
+    )
 
 
 @app.get("/ohlc")
 def ohlc_api():
-    raw_pair = request.args.get("pair", "")
+    raw_pair = request.args.get(
+        "pair",
+        "",
+    )
+
     pair = canonical_symbol(raw_pair)
-    timeframe = request.args.get("timeframe", "M15").upper()
+
+    timeframe = request.args.get(
+        "timeframe",
+        "M15",
+    ).upper()
 
     if not pair:
-        return jsonify({
-            "error": f"Unsupported symbol: {raw_pair}",
-            "hint": "Use /symbols to see supported symbols"
-        }), 400
+        return jsonify(
+            {
+                "error": f"Unsupported symbol: {raw_pair}"
+            }
+        ), 400
 
     if timeframe not in TIMEFRAME_MAP:
-        return jsonify({
-            "error": "Unsupported timeframe",
-            "supported": list(TIMEFRAME_MAP)
-        }), 400
+        return jsonify(
+            {
+                "error": "Unsupported timeframe",
+                "supported": list(
+                    TIMEFRAME_MAP
+                ),
+            }
+        ), 400
 
     try:
-        count = max(100, min(int(request.args.get("count", DEFAULT_CANDLE_COUNT)), 1000))
+        count = max(
+            100,
+            min(
+                int(
+                    request.args.get(
+                        "count",
+                        DEFAULT_CANDLE_COUNT,
+                    )
+                ),
+                1000,
+            ),
+        )
     except ValueError:
-        return jsonify({"error": "Invalid count"}), 400
+        return jsonify(
+            {
+                "error": "Invalid count"
+            }
+        ), 400
 
     try:
-        rows = get_candles(pair, TIMEFRAME_MAP[timeframe], count)
-        candles = closed_candles(normalize(rows), TIMEFRAME_MAP[timeframe])
+        rows = get_candles(
+            pair,
+            TIMEFRAME_MAP[timeframe],
+            count,
+        )
+
+        candles = closed_candles(
+            normalize(rows),
+            TIMEFRAME_MAP[timeframe],
+        )
+
         return jsonify(candles)
+
     except Exception as exc:
-        return jsonify({"error": str(exc), "pair": pair, "timeframe": timeframe}), 502
+        return jsonify(
+            {
+                "error": str(exc),
+                "pair": pair,
+                "timeframe": timeframe,
+            }
+        ), 502
 
 
 @app.get("/scan")
 def scan_api():
-    raw_pair = request.args.get("pair", "")
+    raw_pair = request.args.get(
+        "pair",
+        "",
+    )
+
     pair = canonical_symbol(raw_pair)
-    timeframe = request.args.get("timeframe", "M15").upper()
+
+    timeframe = request.args.get(
+        "timeframe",
+        "M15",
+    ).upper()
 
     if not pair:
-        return jsonify({
-            "error": f"Unsupported symbol: {raw_pair}",
-            "hint": "Use /symbols to see supported symbols"
-        }), 400
+        return jsonify(
+            {
+                "error": f"Unsupported symbol: {raw_pair}"
+            }
+        ), 400
 
     if timeframe not in TIMEFRAME_MAP:
-        return jsonify({
-            "error": "Unsupported timeframe",
-            "supported": list(TIMEFRAME_MAP)
-        }), 400
+        return jsonify(
+            {
+                "error": "Unsupported timeframe",
+                "supported": list(
+                    TIMEFRAME_MAP
+                ),
+            }
+        ), 400
 
     try:
-        count = max(100, min(int(request.args.get("count", DEFAULT_CANDLE_COUNT)), 1000))
-        strength = max(1, int(request.args.get("strength", 3)))
-        min_atr = max(0.0, float(request.args.get("min_atr_move", 0.25)))
-        expansion_atr = max(0.0, float(request.args.get("min_expansion_atr", 0.5)))
-        displacement_atr = max(0.0, float(request.args.get("displacement_atr", 1.0)))
-        min_bars = max(1, int(request.args.get("min_bars", 1)))
-        fib_ratio = max(0.0, min(1.0, float(request.args.get("fib_threshold", 0.5))))
-    except ValueError:
-        return jsonify({"error": "Invalid numeric parameter"}), 400
+        count = max(
+            100,
+            min(
+                int(
+                    request.args.get(
+                        "count",
+                        DEFAULT_CANDLE_COUNT,
+                    )
+                ),
+                1000,
+            ),
+        )
 
-    bos_mode = request.args.get("bos", "body").lower()
-    if bos_mode not in ("body", "wick"):
+        strength = max(
+            1,
+            int(
+                request.args.get(
+                    "strength",
+                    "3",
+                )
+            ),
+        )
+
+        min_atr = max(
+            0.0,
+            float(
+                request.args.get(
+                    "min_atr_move",
+                    "0.25",
+                )
+            ),
+        )
+
+        expansion_atr = max(
+            0.0,
+            float(
+                request.args.get(
+                    "min_expansion_atr",
+                    "0.5",
+                )
+            ),
+        )
+
+        displacement_atr = max(
+            0.0,
+            float(
+                request.args.get(
+                    "displacement_atr",
+                    "1.0",
+                )
+            ),
+        )
+
+        min_bars = max(
+            1,
+            int(
+                request.args.get(
+                    "min_bars",
+                    "1",
+                )
+            ),
+        )
+
+        fib_ratio = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    request.args.get(
+                        "fib_threshold",
+                        "0.5",
+                    )
+                ),
+            ),
+        )
+
+    except ValueError:
+        return jsonify(
+            {
+                "error": "Invalid numeric parameter"
+            }
+        ), 400
+
+    bos_mode = request.args.get(
+        "bos",
+        "body",
+    ).lower()
+
+    if bos_mode not in (
+        "body",
+        "wick",
+    ):
         bos_mode = "body"
 
-    if not SCAN_LOCK.acquire(blocking=False):
-        return jsonify({"error": "Scanner is already processing another request"}), 409
+    if not SCAN_LOCK.acquire(
+        blocking=False
+    ):
+        return jsonify(
+            {
+                "error": (
+                    "Scanner is already processing "
+                    "another request"
+                )
+            }
+        ), 409
 
     try:
-        rows = get_candles(pair, TIMEFRAME_MAP[timeframe], count)
-        candles = closed_candles(normalize(rows), TIMEFRAME_MAP[timeframe])
-        if len(candles) < max(50, strength * 4):
-            return jsonify({"error": "Not enough closed candles", "candles": len(candles)}), 502
-        result = run_scan(
-            pair=pair, timeframe=timeframe, candles=candles,
-            strength=strength, bos_mode=bos_mode, min_atr=min_atr,
-            expansion_atr=expansion_atr, displacement_atr=displacement_atr,
-            min_bars=min_bars, fib_ratio=fib_ratio,
+        rows = get_candles(
+            pair,
+            TIMEFRAME_MAP[timeframe],
+            count,
         )
+
+        candles = closed_candles(
+            normalize(rows),
+            TIMEFRAME_MAP[timeframe],
+        )
+
+        if len(candles) < max(
+            50,
+            strength * 4,
+        ):
+            return jsonify(
+                {
+                    "error": (
+                        "Not enough closed candles"
+                    ),
+                    "candles": len(candles),
+                }
+            ), 502
+
+        result = run_scan(
+            pair=pair,
+            timeframe=timeframe,
+            candles=candles,
+            strength=strength,
+            bos_mode=bos_mode,
+            min_atr=min_atr,
+            expansion_atr=expansion_atr,
+            displacement_atr=displacement_atr,
+            min_bars=min_bars,
+            fib_ratio=fib_ratio,
+        )
+
         return jsonify(result)
+
     except Exception as exc:
-        return jsonify({"error": str(exc), "pair": pair, "timeframe": timeframe}), 502
+        return jsonify(
+            {
+                "error": str(exc),
+                "pair": pair,
+                "timeframe": timeframe,
+            }
+        ), 502
+
     finally:
         SCAN_LOCK.release()
 
 
 @app.get("/structures")
 def structures_api():
-    raw_pair = request.args.get("pair")
-    timeframe = request.args.get("timeframe")
+    raw_pair = request.args.get(
+        "pair",
+        "",
+    )
 
-    sql = "SELECT * FROM structures"
+    raw_timeframe = request.args.get(
+        "timeframe",
+        "",
+    )
+
+    sql = (
+        "SELECT * FROM structures "
+        "WHERE state != 'INVALID'"
+    )
+
     arguments = []
-    where = []
+    clauses = []
 
-    if raw_pair:
-        pair = canonical_symbol(raw_pair)
-        if not pair:
-            return jsonify({"error": f"Unsupported symbol: {raw_pair}"}), 400
-        where.append("pair=?")
-        arguments.append(pair)
+    pairs = unique_values(
+        [
+            canonical_symbol(item)
+            for item in split_csv(raw_pair)
+            if canonical_symbol(item)
+        ]
+    )
 
-    if timeframe:
-        where.append("timeframe=?")
-        arguments.append(timeframe.upper())
+    timeframes = unique_values(
+        [
+            item.upper()
+            for item in split_csv(raw_timeframe)
+            if item.upper() in TIMEFRAME_MAP
+        ]
+    )
 
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY updated_epoch DESC LIMIT 300"
+    if pairs:
+        clauses.append(
+            "pair IN ("
+            + ",".join("?" for _ in pairs)
+            + ")"
+        )
+        arguments.extend(pairs)
+
+    if timeframes:
+        clauses.append(
+            "timeframe IN ("
+            + ",".join("?" for _ in timeframes)
+            + ")"
+        )
+        arguments.extend(timeframes)
+
+    if clauses:
+        sql += " AND " + " AND ".join(clauses)
+
+    sql += (
+        " ORDER BY updated_epoch DESC "
+        "LIMIT 500"
+    )
 
     with DB_LOCK:
         connection = db()
+
         try:
-            rows = connection.execute(sql, arguments).fetchall()
+            rows = connection.execute(
+                sql,
+                arguments,
+            ).fetchall()
+
         finally:
             connection.close()
-    return jsonify([row_to_s(row) for row in rows])
+
+    return jsonify(
+        [
+            row_to_structure(row)
+            for row in rows
+        ]
+    )
 
 
-@app.route("/scanner/targets", methods=["GET", "PUT", "POST"])
+@app.route(
+    "/scanner/targets",
+    methods=["GET", "PUT", "POST"],
+)
 def scanner_targets_api():
     if request.method == "GET":
         config = scanner_settings()
         targets = effective_scanner_targets(config)
-        return jsonify({
-            "ok": True, "targets": targets,
-            "pairs": unique_values([t["pair"] for t in targets]),
-            "timeframes": unique_values([t["timeframe"] for t in targets]),
-            "supported_timeframes": list(TIMEFRAME_MAP),
-            "source": "database" if database_scanner_targets() else "environment",
-        })
+
+        return jsonify(
+            {
+                "ok": True,
+                "targets": targets,
+                "pairs": unique_values(
+                    [
+                        target["pair"]
+                        for target in targets
+                    ]
+                ),
+                "timeframes": unique_values(
+                    [
+                        target["timeframe"]
+                        for target in targets
+                    ]
+                ),
+                "supported_timeframes": list(
+                    TIMEFRAME_MAP
+                ),
+            }
+        )
 
     if not optional_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
 
-    body = request.get_json(force=True, silent=True) or {}
-    pairs = body.get("pairs", [])
-    timeframes = body.get("timeframes", [])
+    body = request.get_json(
+        force=True,
+        silent=True,
+    ) or {}
+
+    pairs = body.get(
+        "pairs",
+        [],
+    )
+
+    timeframes = body.get(
+        "timeframes",
+        [],
+    )
 
     if not isinstance(pairs, list):
-        return jsonify({"error": "pairs must be a JSON list"}), 400
-    if not isinstance(timeframes, list):
-        return jsonify({"error": "timeframes must be a JSON list"}), 400
+        return jsonify(
+            {
+                "error": "pairs must be a JSON list"
+            }
+        ), 400
 
-    # Reject unsupported symbols
-    invalid = [p for p in pairs if not is_supported_symbol(p)]
-    if invalid:
-        return jsonify({
-            "error": "Unsupported symbols detected",
-            "invalid": invalid,
-            "supported": sorted(set(SYMBOL_MAP.values())),
-        }), 400
+    if not isinstance(timeframes, list):
+        return jsonify(
+            {
+                "error": (
+                    "timeframes must be a JSON list"
+                )
+            }
+        ), 400
+
+    invalid_pairs = [
+        pair
+        for pair in pairs
+        if not canonical_symbol(pair)
+    ]
+
+    if invalid_pairs:
+        return jsonify(
+            {
+                "error": "Unsupported symbols",
+                "invalid": invalid_pairs,
+            }
+        ), 400
 
     try:
-        targets = replace_scanner_targets(pairs, timeframes)
-        return jsonify({
-            "ok": True, "message": "Scanner targets updated", "targets": targets,
-            "pairs": unique_values([t["pair"] for t in targets]),
-            "timeframes": unique_values([t["timeframe"] for t in targets]),
-        })
+        targets = replace_scanner_targets(
+            pairs,
+            timeframes,
+        )
+
+        return jsonify(
+            {
+                "ok": True,
+                "message": (
+                    "Scanner targets updated"
+                ),
+                "targets": targets,
+                "pairs": unique_values(
+                    [
+                        target["pair"]
+                        for target in targets
+                    ]
+                ),
+                "timeframes": unique_values(
+                    [
+                        target["timeframe"]
+                        for target in targets
+                    ]
+                ),
+            }
+        )
+
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return jsonify(
+            {
+                "error": str(exc)
+            }
+        ), 400
 
 
 @app.get("/scanner/status")
 def scanner_status_api():
     config = scanner_settings()
-    return jsonify({
-        "running": bool(SCANNER_THREAD and SCANNER_THREAD.is_alive() and not SCANNER_STOP.is_set()),
-        "enabled": config["enabled"],
-        "server_time_utc": now_utc_string(),
-        "interval_seconds": config["interval"],
-        "candle_count": config["count"],
-        "targets": effective_scanner_targets(config),
-        "last_processed": dict(SCANNER_LAST),
-        "diagnostics": {
-            "last_check": dict(SCANNER_DIAGNOSTICS["last_check"]),
-            "last_success": dict(SCANNER_DIAGNOSTICS["last_success"]),
-            "last_error": dict(SCANNER_DIAGNOSTICS["last_error"]),
-            "scan_count": dict(SCANNER_DIAGNOSTICS["scan_count"]),
-        },
-    })
+
+    return jsonify(
+        {
+            "running": bool(
+                SCANNER_THREAD
+                and SCANNER_THREAD.is_alive()
+                and not SCANNER_STOP.is_set()
+            ),
+            "enabled": config["enabled"],
+            "server_time_utc": now_utc_string(),
+            "interval_seconds": config["interval"],
+            "candle_count": config["count"],
+            "g_min_reach": G_MIN_REACH,
+            "targets": effective_scanner_targets(config),
+            "last_processed": dict(SCANNER_LAST),
+            "diagnostics": {
+                "last_check": dict(
+                    SCANNER_DIAGNOSTICS[
+                        "last_check"
+                    ]
+                ),
+                "last_success": dict(
+                    SCANNER_DIAGNOSTICS[
+                        "last_success"
+                    ]
+                ),
+                "last_error": dict(
+                    SCANNER_DIAGNOSTICS[
+                        "last_error"
+                    ]
+                ),
+                "scan_count": dict(
+                    SCANNER_DIAGNOSTICS[
+                        "scan_count"
+                    ]
+                ),
+            },
+        }
+    )
 
 
 @app.post("/scanner/start")
 def scanner_start_api():
     if not optional_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
+
     started = start_scanner()
-    return jsonify({
-        "ok": True, "started": started,
-        "message": "Scanner started" if started else "Scanner already running",
-    })
+
+    return jsonify(
+        {
+            "ok": True,
+            "started": started,
+        }
+    )
 
 
 @app.post("/scanner/stop")
 def scanner_stop_api():
     if not optional_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
+
     stop_scanner()
-    return jsonify({"ok": True, "message": "Scanner is stopping"})
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Scanner stopping",
+        }
+    )
 
 
 # ============================================================
 # TELEGRAM ROUTES
 # ============================================================
 
-@app.post("/telegram/register")
+@app.route(
+    "/telegram/register",
+    methods=["GET", "POST"],
+)
 def telegram_register_api():
-    body = request.get_json(force=True, silent=True) or {}
-    chat_id = body.get("chat_id")
+    if request.method == "GET":
+        chat_id = request.args.get(
+            "chat_id"
+        )
+        username = request.args.get(
+            "username",
+            "",
+        )
+    else:
+        body = request.get_json(
+            force=True,
+            silent=True,
+        ) or {}
+
+        chat_id = body.get("chat_id")
+        username = body.get("username", "")
+
     if not chat_id:
-        return jsonify({"error": "chat_id required"}), 400
-    chat_id = str(chat_id).strip()
+        return jsonify(
+            {
+                "error": "chat_id required"
+            }
+        ), 400
+
     with DB_LOCK:
         connection = db()
+
         try:
             connection.execute(
-                "INSERT INTO telegram_users(chat_id, username, active, created_epoch) VALUES(?,?,1,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, active=1",
-                (chat_id, body.get("username", ""), int(time.time()))
+                """
+                INSERT INTO telegram_users(
+                    chat_id,
+                    username,
+                    active,
+                    created_epoch
+                )
+                VALUES(?,?,1,?)
+                ON CONFLICT(chat_id)
+                DO UPDATE SET
+                    username=excluded.username,
+                    active=1
+                """,
+                (
+                    str(chat_id),
+                    username,
+                    int(time.time()),
+                ),
             )
+
             connection.commit()
-            total = connection.execute(
-                "SELECT COUNT(*) FROM telegram_users WHERE active=1"
-            ).fetchone()[0]
+
         finally:
             connection.close()
-    print(f"[Telegram] Registered chat_id={chat_id}")
-    return jsonify({
-        "ok": True, "chat_id": chat_id, "active_users": total,
-        "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
-    })
+
+    return jsonify(
+        {
+            "ok": True,
+            "chat_id": str(chat_id),
+            "telegram_configured": bool(
+                TELEGRAM_BOT_TOKEN
+            ),
+        }
+    )
 
 
 @app.post("/telegram/unregister")
 def telegram_unregister_api():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(
+        force=True,
+        silent=True,
+    ) or {}
+
     chat_id = body.get("chat_id")
+
     if not chat_id:
-        return jsonify({"error": "chat_id required"}), 400
+        return jsonify(
+            {
+                "error": "chat_id required"
+            }
+        ), 400
+
     with DB_LOCK:
         connection = db()
+
         try:
-            connection.execute("UPDATE telegram_users SET active=0 WHERE chat_id=?", (str(chat_id),))
+            connection.execute(
+                """
+                UPDATE telegram_users
+                SET active=0
+                WHERE chat_id=?
+                """,
+                (str(chat_id),),
+            )
+
             connection.commit()
+
         finally:
             connection.close()
-    return jsonify({"ok": True, "chat_id": str(chat_id), "active": False})
+
+    return jsonify(
+        {
+            "ok": True,
+            "chat_id": str(chat_id),
+            "active": False,
+        }
+    )
 
 
-@app.get("/telegram/users")
-def telegram_users_api():
-    if not strict_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
-    with DB_LOCK:
-        connection = db()
-        try:
-            rows = connection.execute(
-                "SELECT chat_id, username, active, created_epoch FROM telegram_users ORDER BY created_epoch DESC"
-            ).fetchall()
-        finally:
-            connection.close()
-    return jsonify([dict(row) for row in rows])
-
-
-@app.post("/telegram/test")
+@app.route(
+    "/telegram/test",
+    methods=["GET", "POST"],
+)
 def telegram_test_api():
-    if not strict_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
     if not TELEGRAM_BOT_TOKEN:
-        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN not configured"}), 400
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "TELEGRAM_BOT_TOKEN is not configured"
+                ),
+            }
+        ), 400
 
-    body = request.get_json(force=True, silent=True) or {}
-    chat_id = body.get("chat_id")
+    if request.method == "GET":
+        chat_id = request.args.get(
+            "chat_id"
+        )
+    else:
+        body = request.get_json(
+            force=True,
+            silent=True,
+        ) or {}
 
-    message = (
-        "✅ <b>Freedom Structure Scanner</b>\n\n"
-        f"Test time: <b>{now_utc_string()}</b>\n\n"
-        "Telegram delivery is working. You will receive A→F alerts here."
+        chat_id = body.get("chat_id")
+
+    text = (
+        "✅ <b>TradeSignal Test Message</b>\n\n"
+        "Telegram delivery is working.\n"
+        "You will receive F, G, Entry, TP and SL updates here.\n\n"
+        f"🕒 Sent: <b>{now_utc_string()}</b>"
     )
 
     if chat_id:
-        ok, detail = tg_send(str(chat_id).strip(), message)
-        return jsonify({
-            "ok": ok, "sent": int(ok), "detail": detail,
-            "chat_id": str(chat_id).strip(),
-        })
+        ok, message_id, detail = tg_send(
+            str(chat_id),
+            text,
+        )
 
-    with DB_LOCK:
-        connection = db()
-        try:
-            users = connection.execute(
-                "SELECT chat_id FROM telegram_users WHERE active=1"
-            ).fetchall()
-        finally:
-            connection.close()
+        return jsonify(
+            {
+                "ok": ok,
+                "sent": int(ok),
+                "message_id": message_id,
+                "detail": detail,
+            }
+        )
 
-    if not users:
-        return jsonify({"ok": False, "error": "No active users", "sent": 0}), 400
+    if not strict_admin_authorized():
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
 
+    users = active_telegram_users()
     sent = 0
-    failed = []
+
     for user in users:
-        ok, _detail = tg_send(user["chat_id"], message)
+        ok, _message_id, _detail = tg_send(
+            user["chat_id"],
+            text,
+        )
+
         if ok:
             sent += 1
-        else:
-            failed.append(user["chat_id"])
-    return jsonify({
-        "ok": sent > 0, "targeted": len(users), "sent": sent,
-        "failed": failed, "time_utc": now_utc_string(),
-    })
+
+    return jsonify(
+        {
+            "ok": sent > 0,
+            "targeted": len(users),
+            "sent": sent,
+        }
+    )
 
 
-@app.post("/telegram/broadcast")
-def telegram_broadcast_api():
+@app.get("/telegram/plans")
+def telegram_plans_api():
     if not strict_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
-    body = request.get_json(force=True, silent=True) or {}
-    text = str(body.get("text", "")).strip()
-    if not text:
-        return jsonify({"error": "text is required"}), 400
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
+
     with DB_LOCK:
         connection = db()
+
         try:
-            users = connection.execute(
-                "SELECT chat_id FROM telegram_users WHERE active=1"
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM telegram_trade_alerts
+                ORDER BY updated_epoch DESC
+                LIMIT 300
+                """
             ).fetchall()
+
         finally:
             connection.close()
-    sent = sum(1 for u in users if tg_send(u["chat_id"], text)[0])
-    return jsonify({"targeted": len(users), "sent": sent})
+
+    result = []
+
+    for row in rows:
+        item = dict(row)
+
+        if item.get("plan_json"):
+            try:
+                item["plan"] = json.loads(
+                    item["plan_json"]
+                )
+            except Exception:
+                item["plan"] = None
+
+        result.append(item)
+
+    return jsonify(result)
 
 
 # ============================================================
@@ -1850,83 +4992,190 @@ def telegram_broadcast_api():
 @app.post("/admin/reset")
 def admin_reset_api():
     if not strict_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
-    raw_pair = request.args.get("pair")
-    timeframe = request.args.get("timeframe")
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
+
+    raw_pair = request.args.get(
+        "pair"
+    )
+
+    timeframe = request.args.get(
+        "timeframe"
+    )
+
     with DB_LOCK:
         connection = db()
+
         try:
             if raw_pair and timeframe:
                 connection.execute(
-                    "DELETE FROM structures WHERE pair=? AND timeframe=?",
-                    (canonical_symbol(raw_pair), timeframe.upper()),
+                    """
+                    DELETE FROM structures
+                    WHERE pair=? AND timeframe=?
+                    """,
+                    (
+                        canonical_symbol(raw_pair),
+                        timeframe.upper(),
+                    ),
                 )
+
             elif raw_pair:
                 connection.execute(
-                    "DELETE FROM structures WHERE pair=?",
-                    (canonical_symbol(raw_pair),),
+                    """
+                    DELETE FROM structures
+                    WHERE pair=?
+                    """,
+                    (
+                        canonical_symbol(raw_pair),
+                    ),
                 )
+
             else:
-                connection.execute("DELETE FROM structures")
+                connection.execute(
+                    "DELETE FROM structures"
+                )
+
             connection.commit()
+
         finally:
             connection.close()
+
     SCANNER_LAST.clear()
-    return jsonify({"ok": True, "message": "Structure memory reset"})
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Structure memory reset",
+        }
+    )
 
 
-@app.post("/admin/repair-database")
-def admin_repair_database_api():
+@app.route(
+    "/admin/db_reset",
+    methods=["GET", "POST"],
+)
+def admin_db_reset_api():
     if not strict_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
-    quarantine_corrupt_database()
-    return jsonify({"ok": True, "message": "Database quarantined. New DB will be created on next request."})
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
+
+    with DB_LOCK:
+        delete_database_files()
+
+        connection = db()
+        connection.close()
+
+    SCANNER_LAST.clear()
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Database rebuilt",
+            "path": DB_PATH,
+        }
+    )
 
 
 @app.get("/admin/database")
 def admin_database_api():
     if not strict_admin_authorized():
-        return jsonify({"error": "unauthorized"}), 401
-    absolute_path = os.path.abspath(DB_PATH)
-    file_size = os.path.getsize(absolute_path) if os.path.exists(absolute_path) else 0
+        return jsonify(
+            {
+                "error": "unauthorized"
+            }
+        ), 401
+
     with DB_LOCK:
         connection = db()
+
         try:
-            structures_total = connection.execute("SELECT COUNT(*) FROM structures").fetchone()[0]
-            complete_total = connection.execute(
-                "SELECT COUNT(*) FROM structures WHERE state='COMPLETE'"
+            structures = connection.execute(
+                "SELECT COUNT(*) FROM structures"
             ).fetchone()[0]
-            telegram_total = connection.execute(
-                "SELECT COUNT(*) FROM telegram_users WHERE active=1"
+
+            complete = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM structures
+                WHERE state='COMPLETE'
+                """
             ).fetchone()[0]
-            targets_total = connection.execute(
-                "SELECT COUNT(*) FROM scanner_targets WHERE active=1"
+
+            users = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM telegram_users
+                WHERE active=1
+                """
             ).fetchone()[0]
+
+            plans = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM telegram_trade_alerts
+                """
+            ).fetchone()[0]
+
+            active_plans = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM telegram_trade_alerts
+                WHERE trade_state='ACTIVE'
+                """
+            ).fetchone()[0]
+
         finally:
             connection.close()
-    return jsonify({
-        "ok": True,
-        "path": absolute_path,
-        "persistent": absolute_path.startswith("/var/data"),
-        "size_bytes": file_size,
-        "structures_total": structures_total,
-        "structures_complete": complete_total,
-        "telegram_users": telegram_total,
-        "scanner_targets": targets_total,
-        "time_utc": now_utc_string(),
-    })
+
+    return jsonify(
+        {
+            "ok": True,
+            "path": DB_PATH,
+            "persistent": DB_IS_PERSISTENT,
+            "structures": structures,
+            "complete_structures": complete,
+            "telegram_users": users,
+            "trade_plans": plans,
+            "active_trade_plans": active_plans,
+            "time_utc": now_utc_string(),
+        }
+    )
 
 
 # ============================================================
 # START SCANNER
 # ============================================================
 
-if os.environ.get("SCANNER_ENABLED", "true").lower() in ("1", "true", "yes", "on"):
+if os.environ.get(
+    "SCANNER_ENABLED",
+    "true",
+).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+):
     start_scanner()
+
 
 # ============================================================
 # LOCAL DEVELOPMENT
 # ============================================================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
+    app.run(
+        host="0.0.0.0",
+        port=int(
+            os.environ.get(
+                "PORT",
+                "8080",
+            )
+        ),
+        debug=False,
+    )
