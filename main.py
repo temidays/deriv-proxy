@@ -156,6 +156,7 @@ SYMBOL_MAP = {
     "GBPJPY": "frxGBPJPY",
     "EURJPY": "frxEURJPY",
     "AUDJPY": "frxAUDJPY",
+    "CADJPY": "frxCADJPY",
 
     "FRXEURUSD": "frxEURUSD",
     "FRXGBPUSD": "frxGBPUSD",
@@ -168,6 +169,7 @@ SYMBOL_MAP = {
     "FRXGBPJPY": "frxGBPJPY",
     "FRXEURJPY": "frxEURJPY",
     "FRXAUDJPY": "frxAUDJPY",
+    "FRXCADJPY": "frxCADJPY",
 
     # Metals
     "XAUUSD": "frxXAUUSD",
@@ -196,7 +198,7 @@ SCANNER_DIAGNOSTICS = {
 
 
 # ============================================================
-# DATABASE PATH
+# DATABASE PATH (optimized for free Render)
 # ============================================================
 
 def path_is_writable(candidate):
@@ -232,6 +234,14 @@ def resolve_db_path():
     if requested:
         candidates.append(requested)
 
+    # Prefer /tmp on free tier (most reliable ephemeral location)
+    candidates.append(
+        os.path.join(
+            tempfile.gettempdir(),
+            "structure_memory.db",
+        )
+    )
+
     # This is only writable when a Render persistent disk exists.
     candidates.append("/var/data/structure_memory.db")
 
@@ -239,14 +249,6 @@ def resolve_db_path():
     candidates.append(
         os.path.join(
             os.getcwd(),
-            "structure_memory.db",
-        )
-    )
-
-    # Last-resort writable temporary directory.
-    candidates.append(
-        os.path.join(
-            tempfile.gettempdir(),
             "structure_memory.db",
         )
     )
@@ -365,7 +367,7 @@ def now_utc_string():
 
 
 # ============================================================
-# DATABASE
+# DATABASE (hardened for free Render)
 # ============================================================
 
 def delete_database_files():
@@ -527,25 +529,19 @@ def create_schema(connection):
 def open_database():
     connection = sqlite3.connect(
         DB_PATH,
-        timeout=30,
+        timeout=60,
         check_same_thread=False,
     )
 
     connection.row_factory = sqlite3.Row
 
     try:
-        connection.execute(
-            "PRAGMA busy_timeout=30000"
-        )
-        connection.execute(
-            "PRAGMA journal_mode=WAL"
-        )
-        connection.execute(
-            "PRAGMA synchronous=NORMAL"
-        )
-        connection.execute(
-            "PRAGMA foreign_keys=ON"
-        )
+        connection.execute("PRAGMA busy_timeout=60000")
+        connection.execute("PRAGMA journal_mode=DELETE")   # much better on free tier
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA temp_store=MEMORY")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA cache_size=-8000")
     except sqlite3.DatabaseError:
         pass
 
@@ -571,7 +567,11 @@ def db():
             except Exception:
                 pass
 
-        delete_database_files()
+        try:
+            delete_database_files()
+        except Exception:
+            pass
+
         return open_database()
 
 
@@ -1307,6 +1307,10 @@ def significant_swings(
         )
 
     return reduced
+
+
+def fibonacci_level(start, end, ratio=0.5):
+    return float(start) + (float(end) - float(start)) * float(ratio)
 
 
 # ============================================================
@@ -2158,7 +2162,7 @@ def confirm_closed_entry(structure, candles):
         structure.get("live_from_epoch", 0)
     )
 
-    b_level = float(
+    protected_b = float(
         structure["b"]["price"]
     )
 
@@ -2170,13 +2174,13 @@ def confirm_closed_entry(structure, candles):
         if candle_epoch <= g_epoch:
             continue
 
-        # Do not create a new live alert from a historical candle
-        # that existed before the structure became active.
+        # Historical context is allowed for pattern analysis,
+        # but not for generating a new live entry.
         if live_from and candle_epoch <= live_from:
             continue
 
         if structure["direction"] == "BULLISH":
-            touched = (
+            touched_zone = (
                 candle["low"] <= zone_high
                 and candle["high"] >= zone_low
             )
@@ -2186,10 +2190,10 @@ def confirm_closed_entry(structure, candles):
                 and candle["close"] > candle["open"]
             )
 
-            broke_b = candle["low"] <= b_level
+            broke_b = candle["low"] <= protected_b
 
         else:
-            touched = (
+            touched_zone = (
                 candle["high"] >= zone_low
                 and candle["low"] <= zone_high
             )
@@ -2199,15 +2203,16 @@ def confirm_closed_entry(structure, candles):
                 and candle["close"] < candle["open"]
             )
 
-            broke_b = candle["high"] >= b_level
+            broke_b = candle["high"] >= protected_b
 
         if broke_b:
-            return mark_invalid(
+            mark_invalid(
                 structure,
                 "protected_B_broken_before_entry",
             )
+            return False
 
-        if touched and rejection_close:
+        if touched_zone and rejection_close:
             structure["entry_price"] = float(
                 candle["close"]
             )
@@ -2860,93 +2865,6 @@ def send_cancel_notifications(structure, reason):
 # ============================================================
 # ENTRY AND TP/SL MONITORING
 # ============================================================
-
-def confirm_closed_entry(structure, candles):
-    if structure.get("stage") != "WAITING_FOR_ENTRY":
-        return False
-
-    if not structure.get("g"):
-        return False
-
-    zone_low, zone_high = structure_a_zone(
-        structure,
-        candles,
-    )
-
-    g_epoch = int(
-        structure["g"]["epoch"]
-    )
-
-    live_from = int(
-        structure.get("live_from_epoch", 0)
-    )
-
-    protected_b = float(
-        structure["b"]["price"]
-    )
-
-    for candle in candles:
-        candle_epoch = int(
-            candle["epoch"]
-        )
-
-        if candle_epoch <= g_epoch:
-            continue
-
-        # Historical context is allowed for pattern analysis,
-        # but not for generating a new live entry.
-        if live_from and candle_epoch <= live_from:
-            continue
-
-        if structure["direction"] == "BULLISH":
-            touched_zone = (
-                candle["low"] <= zone_high
-                and candle["high"] >= zone_low
-            )
-
-            rejection_close = (
-                candle["close"] > zone_high
-                and candle["close"] > candle["open"]
-            )
-
-            broke_b = candle["low"] <= protected_b
-
-        else:
-            touched_zone = (
-                candle["high"] >= zone_low
-                and candle["low"] <= zone_high
-            )
-
-            rejection_close = (
-                candle["close"] < zone_low
-                and candle["close"] < candle["open"]
-            )
-
-            broke_b = candle["high"] >= protected_b
-
-        if broke_b:
-            mark_invalid(
-                structure,
-                "protected_B_broken_before_entry",
-            )
-            return False
-
-        if touched_zone and rejection_close:
-            structure["entry_price"] = float(
-                candle["close"]
-            )
-
-            structure["entry_epoch"] = candle_epoch
-
-            set_stage(
-                structure,
-                "ACTIVE",
-            )
-
-            return True
-
-    return False
-
 
 def monitor_trade_alerts(pair, timeframe, candles):
     pair = canonical_symbol(pair)
@@ -5148,6 +5066,36 @@ def admin_database_api():
             "time_utc": now_utc_string(),
         }
     )
+
+
+# ============================================================
+# DIAGNOSTICS (kept for compatibility)
+# ============================================================
+
+def diagnostic_started(pair, timeframe):
+    key = f"{pair}|{timeframe}"
+    SCANNER_DIAGNOSTICS["last_check"][key] = now_utc_string()
+    SCANNER_DIAGNOSTICS["scan_count"][key] = (
+        SCANNER_DIAGNOSTICS["scan_count"].get(key, 0) + 1
+    )
+
+
+def diagnostic_success(pair, timeframe, result):
+    key = f"{pair}|{timeframe}"
+    SCANNER_DIAGNOSTICS["last_success"][key] = {
+        "time": now_utc_string(),
+        "skipped": result.get("skipped"),
+        "completed_now": result.get("completed_now"),
+        "trade_events_now": result.get("trade_events_now"),
+    }
+
+
+def diagnostic_error(pair, timeframe, error):
+    key = f"{pair}|{timeframe}"
+    SCANNER_DIAGNOSTICS["last_error"][key] = {
+        "time": now_utc_string(),
+        "error": str(error),
+    }
 
 
 # ============================================================
