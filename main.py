@@ -3048,7 +3048,7 @@ def send_active_notifications(structure, candles):
     return sent
 
 
-def send_cancel_notifications(structure, reason):
+    def send_cancel_notifications(structure, reason):
     users = active_telegram_users()
 
     sent = 0
@@ -3071,12 +3071,12 @@ def send_cancel_notifications(structure, reason):
         ):
             continue
 
-reply_id = (
+    reply_id = (
     existing["active_message_id"]
     or existing["g_message_id"]
     or existing["f_message_id"]
     or None
-)
+    )
 
         ok, _message_id, detail = tg_send(
             chat_id,
