@@ -1873,19 +1873,33 @@ def advance_structure(
             if not reaches_g:
                 continue
 
-            structure["g"] = point(
-                "G",
-                "STRENGTH_PUSH",
-                candle,
-                g_price,
-            )
+                    structure["g"] = point(
+            "G",
+            "STRENGTH_PUSH",
+            candle,
+            g_price,
+        )
 
-            set_stage(
-                structure,
-                "WAITING_FOR_ENTRY",
-            )
+        set_stage(
+            structure,
+            "WAITING_FOR_ENTRY",
+        )
 
-            break
+        break
+
+    # ------------------------------------------------
+    # G formed = pattern COMPLETE (app saves history).
+    # stage stays WAITING_FOR_ENTRY so entry + TP/SL
+    # monitoring keeps working.
+    # Also repairs structures that formed G before
+    # this rule existed.
+    # ------------------------------------------------
+    if structure.get("g") and structure.get("state") not in (
+        "ACTIVE",
+        "CLOSED",
+        "INVALID",
+    ):
+        structure["state"] = "COMPLETE"
 
     return structure
 
@@ -3312,10 +3326,11 @@ def run_scan(
             delete_structure(structure)
             continue
 
-        if (
-            previous_stage != "COMPLETE"
-            and structure.get("stage") == "COMPLETE"
-        ):
+                g_epoch_now = int(
+            structure["g"]["epoch"]
+        ) if structure.get("g") else 0
+
+        if g_epoch_now and g_epoch_now != previous_g_epoch:
             completed_now.append(structure)
 
         save(structure)
