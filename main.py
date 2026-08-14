@@ -351,19 +351,17 @@ def split_csv(value):
 # TIME HELPERS
 # ============================================================
 
-def epoch_to_utc(epoch):
-    moment = datetime.fromtimestamp(
-        int(epoch),
-        tz=timezone.utc,
-    )
+from zoneinfo import ZoneInfo   # add this import at the top with the other imports
 
-    return moment.strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
+def epoch_to_local(epoch):
+    """Convert epoch to the timezone set in TELEGRAM_TIMEZONE"""
+    try:
+        tz = ZoneInfo(TELEGRAM_TIMEZONE)
+    except Exception:
+        tz = timezone.utc
 
-
-def now_utc_string():
-    return epoch_to_utc(int(time.time()))
+    moment = datetime.fromtimestamp(int(epoch), tz=tz)
+    return moment.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 # ============================================================
@@ -2233,29 +2231,52 @@ def confirm_closed_entry(structure, candles):
 # TELEGRAM TEXT
 # ============================================================
 
-def f_message_text(structure):
-    icon = (
-        "🟢"
-        if structure["direction"] == "BULLISH"
-        else "🔴"
-    )
+# Telegram time zone (use your local timezone name)
+# Examples: "Europe/London", "Africa/Lagos", "America/New_York", "UTC"
+TELEGRAM_TIMEZONE = os.environ.get("TELEGRAM_TIMEZONE", "UTC")
 
-    return "\n".join(
-        [
-            f"{icon} <b>{structure['direction']} F CONFIRMED</b>",
-            "",
-            f"Symbol: <b>{structure['pair']}</b>",
-            f"Timeframe: <b>{structure['timeframe']}</b>",
-            f"F time: <b>{epoch_to_utc(structure['f']['epoch'])}</b>",
-            "",
-            "F reached the Fibonacci retracement threshold.",
-            "F did not break protected B.",
-            "",
-            "Watching for G strength push near or beyond 100%.",
-            "",
-            f"Message time: <b>{now_utc_string()}</b>",
-        ]
-    )
+def f_message_text(structure):
+    icon = "🔴" if structure["direction"] == "BEARISH" else "🟢"
+
+    def fmt(point):
+        if not point:
+            return "—"
+        return (
+            f"{point['label']} — {point['role']}\n"
+            f"Price: {point['price']}\n"
+            f"Candle time: {epoch_to_local(point['epoch'])}"
+        )
+
+    lines = [
+        f"{icon} <b>{structure['direction']} A→F STRUCTURE CONFIRMED</b>",
+        "",
+        f"Symbol: <b>{structure['pair']}</b>",
+        f"Timeframe: <b>{structure['timeframe']}</b>",
+        f"Detected: <b>{epoch_to_local(int(time.time()))}</b>",
+        "",
+        "────────────────────",
+        fmt(structure.get("a")),
+        "",
+        fmt(structure.get("c")),
+        "",
+        fmt(structure.get("b")),
+        "",
+        fmt(structure.get("d")),
+        "",
+        fmt(structure.get("e")),
+        "",
+        fmt(structure.get("f")),
+        "────────────────────",
+        "",
+        f"Fibonacci 50%: <b>{structure.get('fib50')}</b>",
+        "",
+        "You can now draw the lines on your chart.",
+        "Waiting for G strength push...",
+        "",
+        f"Message time: <b>{epoch_to_local(int(time.time()))}</b>",
+    ]
+
+    return "\n".join(lines)
 
 
 def g_message_text(structure, candles):
@@ -2276,7 +2297,7 @@ def g_message_text(structure, candles):
             "",
             f"Symbol: <b>{plan['pair']}</b>",
             f"Timeframe: <b>{plan['timeframe']}</b>",
-            f"G time: <b>{epoch_to_utc(structure['g']['epoch'])}</b>",
+            f"G time: <b>{epoch_to_local(structure['g']['epoch'])}</b>",
             f"G price: <b>{plan['g_price']}</b>",
             "",
             f"Entry Zone: <b>{plan['entry_zone_low']} - {plan['entry_zone_high']}</b>",
@@ -2289,7 +2310,7 @@ def g_message_text(structure, candles):
             "and close in the expected direction.",
             "TP will be calculated when the trade becomes active.",
             "",
-            f"Message time: <b>{now_utc_string()}</b>",
+            f"Message time: <b>{epoch_to_local()}</b>",
         ]
     )
 
@@ -2323,23 +2344,18 @@ def active_message_text(structure, candles):
             "",
             f"Entry zone: {plan['entry_zone_low']} - {plan['entry_zone_high']}",
             "",
-            f"Message time: <b>{now_utc_string()}</b>",
+            f"Message time: <b>{epoch_to_local()}</b>",
         ]
     )
 
 
 def trade_event_text(plan, event, price, candle_epoch):
-    icon = (
-        "🛑"
-        if event == "SL"
-        else "✅"
-    )
-
-    title = (
-        "STOP LOSS HIT"
-        if event == "SL"
-        else f"{event} HIT"
-    )
+    if event == "SL":
+        icon = "❌"          # red X
+        title = "STOP LOSS HIT"
+    else:
+        icon = "✔️"          # green pass mark
+        title = f"{event} HIT"
 
     return "\n".join(
         [
@@ -2350,8 +2366,8 @@ def trade_event_text(plan, event, price, candle_epoch):
             f"Direction: <b>{plan['direction']}</b>",
             "",
             f"Price: <b>{price}</b>",
-            f"Candle time: <b>{epoch_to_utc(candle_epoch)}</b>",
-            f"Message time: <b>{now_utc_string()}</b>",
+            f"Candle time: <b>{epoch_to_local(candle_epoch)}</b>",
+            f"Message time: <b>{epoch_to_local(int(time.time()))}</b>",
         ]
     )
 
@@ -2366,7 +2382,7 @@ def cancel_message_text(structure, reason):
             f"Reason: <b>{reason}</b>",
             "",
             "No trade was activated.",
-            f"Time: <b>{now_utc_string()}</b>",
+            f"Time: <b>{epoch_to_local()}</b>",
         ]
     )
 
