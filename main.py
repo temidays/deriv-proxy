@@ -2248,7 +2248,6 @@ def confirm_closed_entry(structure, candles):
     )
     return True
 
-    return False
     
     def setup_already_ran_to_targets(
     structure,
