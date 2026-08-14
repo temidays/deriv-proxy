@@ -3048,14 +3048,12 @@ def send_active_notifications(structure, candles):
     return sent
 
 
-    def send_cancel_notifications(structure, reason):
+def send_cancel_notifications(structure, reason):
     users = active_telegram_users()
-
     sent = 0
 
     for user in users:
         chat_id = user["chat_id"]
-
         existing = get_trade_alert(
             structure_key(structure),
             chat_id,
@@ -3071,12 +3069,12 @@ def send_active_notifications(structure, candles):
         ):
             continue
 
-    reply_id = (
-    existing["active_message_id"]
-    or existing["g_message_id"]
-    or existing["f_message_id"]
-    or None
-    )
+        reply_id = (
+            existing["active_message_id"]
+            or existing["g_message_id"]
+            or existing["f_message_id"]
+            or None
+        )
 
         ok, _message_id, detail = tg_send(
             chat_id,
@@ -3100,7 +3098,6 @@ def send_active_notifications(structure, candles):
             trade_state="CANCELLED",
             last_event=reason,
         )
-
         sent += 1
 
     return sent
