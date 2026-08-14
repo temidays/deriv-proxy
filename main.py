@@ -994,7 +994,92 @@ def delete_structure_by_key(structure_key_value):
             connection.commit()
         finally:
             connection.close()
-            
+
+def structure_for_key(structure_key_value):
+    with DB_LOCK:
+        connection = db()
+        try:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM structures
+                WHERE structure_key=?
+                """,
+                (structure_key_value,),
+            ).fetchone()
+        finally:
+            connection.close()
+
+    if not row:
+        return None
+
+    return row_to_structure(row)
+
+
+def close_structure_by_key(structure_key_value, reason):
+    """
+    Keep the row as CLOSED instead of deleting it.
+
+    This is important: the scanner remembers the structure key,
+    so it does not rediscover the same historical A -> G setup.
+    """
+    with DB_LOCK:
+        connection = db()
+        try:
+            connection.execute(
+                """
+                UPDATE structures
+                SET state='CLOSED',
+                    stage='CLOSED',
+                    discard_reason=?,
+                    updated_epoch=?
+                WHERE structure_key=?
+                """,
+                (
+                    reason,
+                    int(time.time()),
+                    structure_key_value,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+
+def close_trade_alerts_for_structure(
+    structure_key_value,
+    trade_state,
+    reason,
+):
+    """
+    Stop Telegram monitoring too.
+
+    Without this, an old ACTIVE Telegram plan could still be
+    checked for TP/SL after you manually close the setup.
+    """
+    with DB_LOCK:
+        connection = db()
+        try:
+            connection.execute(
+                """
+                UPDATE telegram_trade_alerts
+                SET trade_state=?,
+                    last_event=?,
+                    updated_epoch=?
+                WHERE structure_key=?
+                """,
+                (
+                    trade_state,
+                    reason,
+                    int(time.time()),
+                    structure_key_value,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+
 # ============================================================
 # DERIV CANDLES
 # ============================================================
@@ -2515,17 +2600,19 @@ def trade_event_text(plan, event, price, candle_epoch):
 def cancel_message_text(structure, reason):
     return "\n".join(
         [
-            "⚠️ <b>SETUP CANCELLED</b>",
+            "⚪ <b>SETUP / TRADE CLOSED</b>",
             "",
             f"Symbol: <b>{structure['pair']}</b>",
             f"Timeframe: <b>{structure['timeframe']}</b>",
+            f"Direction: <b>{structure['direction']}</b>",
             f"Reason: <b>{reason}</b>",
             "",
-            "No trade was activated.",
+            "Scanner monitoring has stopped for this setup.",
+            "The engine can now search for a fresh structure.",
+            "",
             f"Time: <b>{epoch_to_local(int(time.time()))}</b>",
         ]
     )
-
 
 # ============================================================
 # TELEGRAM API
@@ -2984,11 +3071,12 @@ def send_cancel_notifications(structure, reason):
         ):
             continue
 
-        reply_id = (
-            existing["g_message_id"]
-            or existing["f_message_id"]
-            or None
-        )
+reply_id = (
+    existing["active_message_id"]
+    or existing["g_message_id"]
+    or existing["f_message_id"]
+    or None
+)
 
         ok, _message_id, detail = tg_send(
             chat_id,
@@ -4676,6 +4764,129 @@ def structures_api():
         ]
     )
 
+    @app.post("/structures/close")
+def close_structure_api():
+    if not strict_admin_authorized():
+        return jsonify(
+            {
+                "ok": False,
+                "error": "unauthorized",
+            }
+        ), 401
+
+    body = request.get_json(
+        force=True,
+        silent=True,
+    ) or {}
+
+    structure_key_value = str(
+        body.get("structure_key", "")
+    ).strip()
+
+    outcome = str(
+        body.get("outcome", "DISCARDED")
+    ).strip().upper()
+
+    if not structure_key_value:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "structure_key is required",
+            }
+        ), 400
+
+    outcomes = {
+        "DISCARDED": (
+            "CANCELLED",
+            "Manually discarded from Android app",
+        ),
+        "SL_HIT": (
+            "SL_HIT",
+            "Manually marked as Stop Loss hit from Android app",
+        ),
+        "TP_HIT": (
+            "CLOSED",
+            "Manually marked as final Take Profit hit from Android app",
+        ),
+    }
+
+    if outcome not in outcomes:
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "outcome must be DISCARDED, "
+                    "SL_HIT, or TP_HIT"
+                ),
+            }
+        ), 400
+
+    # Do not let the scanner save/update this structure
+    # at the exact same time as the manual close request.
+    if not SCAN_LOCK.acquire(blocking=False):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Scanner is busy. Try again in a few seconds.",
+            }
+        ), 409
+
+    try:
+        structure = structure_for_key(
+            structure_key_value
+        )
+
+        if not structure:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Structure not found",
+                }
+            ), 404
+
+        trade_state, default_reason = outcomes[outcome]
+
+        reason = str(
+            body.get("reason", "")
+        ).strip() or default_reason
+
+        # Notify Telegram users if this structure already has
+        # an F/G/Active message chain.
+        send_cancel_notifications(
+            structure,
+            reason,
+        )
+
+        # Stop future Telegram TP/SL monitoring.
+        close_trade_alerts_for_structure(
+            structure_key_value,
+            trade_state,
+            reason,
+        )
+
+        # Keep the key in the database as CLOSED.
+        # This prevents the engine from rediscovering
+        # exactly the same old historical setup.
+        close_structure_by_key(
+            structure_key_value,
+            reason,
+        )
+
+        return jsonify(
+            {
+                "ok": True,
+                "structure_key": structure_key_value,
+                "state": "CLOSED",
+                "outcome": outcome,
+                "message": (
+                    "Setup closed. Scanner can now "
+                    "search for another position."
+                ),
+            }
+        )
+
+    finally:
+        SCAN_LOCK.release()
 
 @app.route(
     "/scanner/targets",
