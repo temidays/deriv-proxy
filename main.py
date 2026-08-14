@@ -2114,7 +2114,7 @@ def active_trade_plan(structure, candles):
         "entry_epoch": int(
             structure["entry_epoch"]
         ),
-        "entry_time_utc": epoch_to_utc(
+        "entry_time_utc": epoch_to_local(
             structure["entry_epoch"]
         ),
         "created_utc": now_utc_string(),
