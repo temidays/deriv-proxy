@@ -2315,10 +2315,19 @@ def confirm_closed_entry(structure, candles):
     structure["entry_price"] = float(entry_candle["close"])
     structure["entry_epoch"] = int(entry_candle["epoch"])
 
-    finished, finish_reason = trade_already_finished(
-        structure,
-        candles,
-    )
+    finished = False
+    finish_reason = ""
+
+    try:
+        finished, finish_reason = trade_already_finished(
+            structure,
+            candles,
+        )
+    except Exception as exc:
+        print(
+            f"[Scanner] trade_already_finished error "
+            f"in confirm_closed_entry: {exc}"
+        )
 
     if finished:
         mark_invalid(
@@ -2417,15 +2426,25 @@ def trade_already_finished(structure, candles):
     if not structure.get("g"):
         return False, ""
 
-    plan = active_trade_plan(
-        structure,
-        candles,
-    )
+    if not structure.get("entry_price"):
+        return False, ""
+
+    try:
+        plan = active_trade_plan(
+            structure,
+            candles,
+        )
+    except Exception:
+        return False, ""
 
     entry_epoch = int(structure["entry_epoch"])
     direction = structure["direction"]
-    stop_loss = float(plan["stop_loss"])
-    tp3 = float(plan["tp3"])
+
+    try:
+        stop_loss = float(plan["stop_loss"])
+        tp3 = float(plan["tp3"])
+    except (KeyError, TypeError, ValueError):
+        return False, ""
 
     for candle in candles:
         candle_epoch = int(candle["epoch"])
@@ -3449,6 +3468,8 @@ def latest_point_epoch(structure):
         if pt:
             return int(pt.get("epoch", 0))
     return 0
+
+
 def run_scan(
     pair,
     timeframe,
@@ -3548,12 +3569,22 @@ def run_scan(
             )
 
         if structure.get("stage") == "ACTIVE":
-            finished, finish_reason = trade_already_finished(
-                structure,
-                candles,
-            )
+            finished = False
+            finish_reason = ""
 
-        if finished:
+            try:
+                finished, finish_reason = trade_already_finished(
+                    structure,
+                    candles,
+                )
+            except Exception as exc:
+                print(
+                    f"[Scanner] trade_already_finished error "
+                    f"for {structure.get('pair')} "
+                    f"{structure.get('timeframe')}: {exc}"
+                )
+
+            if finished:
                 mark_invalid(
                     structure,
                     finish_reason,
