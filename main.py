@@ -4156,8 +4156,15 @@ def scanner_loop():
             else:
                 try:
     targets = effective_scanner_targets(
-        config
+    config
     )
+
+    if not targets:
+    print(
+        "[Scanner] No targets configured. "
+        "Set pairs in the app or SCANNER_PAIRS env var."
+    )
+    else:
     for target in targets:
         if SCANNER_STOP.is_set():
             break
