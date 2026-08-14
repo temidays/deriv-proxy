@@ -1826,7 +1826,6 @@ def advance_structure(
     # --------------------------------------------------------
     # G = strength push near or beyond 100%
     # --------------------------------------------------------
-
     if structure.get("g") is None:
         total_range = abs(
             structure["e"]["price"]
@@ -1873,33 +1872,20 @@ def advance_structure(
             if not reaches_g:
                 continue
 
-                    structure["g"] = point(
-            "G",
-            "STRENGTH_PUSH",
-            candle,
-            g_price,
-        )
+            structure["g"] = point(
+                "G",
+                "STRENGTH_PUSH",
+                candle,
+                g_price,
+            )
 
-        set_stage(
-            structure,
-            "WAITING_FOR_ENTRY",
-        )
+            # G is confirmed. Now wait for a closed A-zone entry.
+            set_stage(
+                structure,
+                "WAITING_FOR_ENTRY",
+            )
 
-        break
-
-    # ------------------------------------------------
-    # G formed = pattern COMPLETE (app saves history).
-    # stage stays WAITING_FOR_ENTRY so entry + TP/SL
-    # monitoring keeps working.
-    # Also repairs structures that formed G before
-    # this rule existed.
-    # ------------------------------------------------
-    if structure.get("g") and structure.get("state") not in (
-        "ACTIVE",
-        "CLOSED",
-        "INVALID",
-    ):
-        structure["state"] = "COMPLETE"
+            break
 
     return structure
 
@@ -2327,7 +2313,7 @@ def g_message_text(structure, candles):
             "and close in the expected direction.",
             "TP will be calculated when the trade becomes active.",
             "",
-            f"Message time: <b>{epoch_to_local()}</b>",
+            f"Message time: <b>{epoch_to_local(int(time.time()))}</b>",
         ]
     )
 
@@ -2361,7 +2347,7 @@ def active_message_text(structure, candles):
             "",
             f"Entry zone: {plan['entry_zone_low']} - {plan['entry_zone_high']}",
             "",
-            f"Message time: <b>{epoch_to_local()}</b>",
+            f"Message time: <b>{epoch_to_local(int(time.time()))}</b>",
         ]
     )
 
@@ -2399,7 +2385,7 @@ def cancel_message_text(structure, reason):
             f"Reason: <b>{reason}</b>",
             "",
             "No trade was activated.",
-            f"Time: <b>{epoch_to_local()}</b>",
+            f"Time: <b>{epoch_to_local(int(time.time()))}</b>",
         ]
     )
 
