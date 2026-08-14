@@ -4084,7 +4084,7 @@ def health_api():
         {
             "ok": True,
             "engine": "TradeSignal Structure Scanner V9",
-            "server_time_utc": now_utc_string(),
+            "server_time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "chronological_order": (
                 "A -> C -> B -> D -> E -> F -> G"
             ),
