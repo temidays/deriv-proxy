@@ -4142,115 +4142,88 @@ def scanner_loop():
             config = scanner_settings()
 
             if not config["enabled"]:
-                print(
-                    "[Scanner] Disabled"
-                )
+                print("[Scanner] Disabled")
 
-            elif not SCAN_LOCK.acquire(
-                blocking=False
-            ):
-                print(
-                    "[Scanner] Previous cycle still running"
-                )
+            elif not SCAN_LOCK.acquire(blocking=False):
+                print("[Scanner] Previous cycle still running")
 
             else:
                 try:
-    targets = effective_scanner_targets(
-    config
-    )
+                    targets = effective_scanner_targets(config)
 
-    if not targets:
-    print(
-        "[Scanner] No targets configured. "
-        "Set pairs in the app or SCANNER_PAIRS env var."
-    )
-    else:
-    for target in targets:
-        if SCANNER_STOP.is_set():
-            break
+                    if not targets:
+                        print(
+                            "[Scanner] No targets configured. "
+                            "Set pairs in the app or SCANNER_PAIRS env var."
+                        )
+                    else:
+                        for target in targets:
+                            if SCANNER_STOP.is_set():
+                                break
 
-                        pair = target["pair"]
-                        timeframe = target["timeframe"]
+                            pair = target["pair"]
+                            timeframe = target["timeframe"]
 
-                        try:
-                            result = continuous_scan_once(
-                                pair,
-                                timeframe,
-                                config,
-                            )
-
-                            if result.get(
-                                "completed_now",
-                                0,
-                            ):
-                                print(
-                                    f"[Scanner] {pair} "
-                                    f"{timeframe}: "
-                                    f"{result['completed_now']} "
-                                    "new structure(s)"
+                            try:
+                                result = continuous_scan_once(
+                                    pair,
+                                    timeframe,
+                                    config,
                                 )
 
-                            elif result.get(
-                                "trade_events_now",
-                                0,
-                            ):
+                                if result.get("completed_now", 0):
+                                    print(
+                                        f"[Scanner] {pair} "
+                                        f"{timeframe}: "
+                                        f"{result['completed_now']} "
+                                        "new structure(s)"
+                                    )
+                                elif result.get("trade_events_now", 0):
+                                    print(
+                                        f"[Scanner] {pair} "
+                                        f"{timeframe}: "
+                                        f"{result['trade_events_now']} "
+                                        "trade event(s)"
+                                    )
+                                else:
+                                    print(
+                                        f"[Scanner] {pair} "
+                                        f"{timeframe}: OK "
+                                        f"(skipped="
+                                        f"{result.get('skipped')})"
+                                    )
+
+                            except Exception as exc:
+                                diagnostic_error(
+                                    pair,
+                                    timeframe,
+                                    exc,
+                                )
                                 print(
                                     f"[Scanner] {pair} "
-                                    f"{timeframe}: "
-                                    f"{result['trade_events_now']} "
-                                    "trade event(s)"
+                                    f"{timeframe} ERROR: "
+                                    f"{exc}"
                                 )
-
-                            else:
-                                print(
-                                    f"[Scanner] {pair} "
-                                    f"{timeframe}: OK "
-                                    f"(skipped="
-                                    f"{result.get('skipped')})"
-                                )
-
-                        except Exception as exc:
-                            diagnostic_error(
-                                pair,
-                                timeframe,
-                                exc,
-                            )
-
-                            print(
-                                f"[Scanner] {pair} "
-                                f"{timeframe} ERROR: "
-                                f"{exc}"
-                            )
 
                 finally:
                     SCAN_LOCK.release()
 
         except Exception as exc:
-            print(
-                f"[Scanner] OUTER ERROR: {exc}"
-            )
+            print(f"[Scanner] OUTER ERROR: {exc}")
 
         elapsed = time.time() - cycle_started
         config = scanner_settings()
 
         wait_seconds = max(
             1,
-            config["interval"]
-            - int(elapsed),
+            config["interval"] - int(elapsed),
         )
 
-        print(
-            f"[Scanner] Next cycle in "
-            f"{wait_seconds}s"
-        )
+        print(f"[Scanner] Next cycle in {wait_seconds}s")
 
-        SCANNER_STOP.wait(
-            wait_seconds
-        )
+        SCANNER_STOP.wait(wait_seconds)
 
-    print(
-        "[Scanner] Stopped"
-    )
+    print("[Scanner] Stopped")
 
 
 def start_scanner():
