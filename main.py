@@ -2143,18 +2143,10 @@ def active_trade_plan(structure, candles):
 
 def confirm_closed_entry(structure, candles):
     """
-    Entry is confirmed only by a closed candle after G.
-
-    Bullish:
-        candle touches A-zone and closes bullish above zone high.
-
-    Bearish:
-        candle touches A-zone and closes bearish below zone low.
-
-    A wick into the zone is enough. The candle must close in the
-    expected direction.
+    After G:
+    - confirm a live A-zone entry
+    - or discard the setup if history already used it
     """
-
     if structure.get("stage") != "WAITING_FOR_ENTRY":
         return False
 
@@ -2165,81 +2157,205 @@ def confirm_closed_entry(structure, candles):
         structure,
         candles,
     )
+    g_epoch = int(structure["g"]["epoch"])
+    live_from = int(structure.get("live_from_epoch", 0) or 0)
+    protected_b = float(structure["b"]["price"])
+    direction = structure["direction"]
 
-    g_epoch = int(
-        structure["g"]["epoch"]
-    )
+    def touches_zone(candle):
+        return (
+            float(candle["low"]) <= zone_high
+            and float(candle["high"]) >= zone_low
+        )
 
-    live_from = int(
-        structure.get("live_from_epoch", 0)
-    )
+    def is_entry_candle(candle):
+        if not touches_zone(candle):
+            return False
 
-    protected_b = float(
-        structure["b"]["price"]
-    )
+        close = float(candle["close"])
+        opened = float(candle["open"])
+
+        # Wick into the zone is enough.
+        # Candle must close in the expected direction.
+        if direction == "BULLISH":
+            return close > opened
+
+        return close < opened
+
+    def broke_protected_b(candle):
+        if direction == "BULLISH":
+            return float(candle["low"]) <= protected_b
+
+        return float(candle["high"]) >= protected_b
+
+    entry_candle = None
+    touched_zone = False
 
     for candle in candles:
-        candle_epoch = int(
-            candle["epoch"]
-        )
+        candle_epoch = int(candle["epoch"])
 
         if candle_epoch <= g_epoch:
             continue
 
-        # Historical context is allowed for pattern analysis,
-        # but not for generating a new live entry.
-        if live_from and candle_epoch <= live_from:
-            continue
-
-        if structure["direction"] == "BULLISH":
-            touched_zone = (
-                candle["low"] <= zone_high
-                and candle["high"] >= zone_low
-            )
-
-            rejection_close = (
-                candle["close"] > zone_high
-                and candle["close"] > candle["open"]
-            )
-
-            broke_b = candle["low"] <= protected_b
-
-        else:
-            touched_zone = (
-                candle["high"] >= zone_low
-                and candle["low"] <= zone_high
-            )
-
-            rejection_close = (
-                candle["close"] < zone_low
-                and candle["close"] < candle["open"]
-            )
-
-            broke_b = candle["high"] >= protected_b
-
-        if broke_b:
+        if broke_protected_b(candle) and entry_candle is None:
             mark_invalid(
                 structure,
                 "protected_B_broken_before_entry",
             )
             return False
 
-        if touched_zone and rejection_close:
-            structure["entry_price"] = float(
-                candle["close"]
-            )
+        if entry_candle is None:
+            if touches_zone(candle):
+                touched_zone = True
 
-            structure["entry_epoch"] = candle_epoch
+            if is_entry_candle(candle):
+                entry_candle = candle
 
-            set_stage(
+    if entry_candle is None:
+        if touched_zone and setup_already_ran_to_targets(
+            structure,
+            candles,
+            g_epoch,
+            zone_low,
+            zone_high,
+        ):
+            mark_invalid(
                 structure,
-                "ACTIVE",
+                "missed_entry_targets_already_hit",
             )
+            return False
 
+        return False
+
+    structure["entry_price"] = float(entry_candle["close"])
+    structure["entry_epoch"] = int(entry_candle["epoch"])
+
+    finished, finish_reason = trade_already_finished(
+        structure,
+        candles,
+    )
+
+    if finished:
+        mark_invalid(
+            structure,
+            finish_reason,
+        )
+        return False
+
+    set_stage(
+        structure,
+        "ACTIVE",
+    )
+    return True
+
+    return False
+    
+    def setup_already_ran_to_targets(
+    structure,
+    candles,
+    g_epoch,
+    zone_low,
+    zone_high,
+):
+    """
+    Price touched the A-zone after G, never printed a valid entry,
+    then already ran to D / E / G. The pullback is gone.
+    """
+    direction = structure["direction"]
+    targets = []
+
+    for key in ("d", "e", "g"):
+        point_data = structure.get(key)
+
+        if not point_data:
+            continue
+
+        price = float(point_data["price"])
+
+        if direction == "BULLISH" and price > zone_high:
+            targets.append(price)
+
+        if direction == "BEARISH" and price < zone_low:
+            targets.append(price)
+
+    if not targets:
+        return False
+
+    target = (
+        min(targets)
+        if direction == "BULLISH"
+        else max(targets)
+    )
+
+    zone_was_touched = False
+
+    for candle in candles:
+        candle_epoch = int(candle["epoch"])
+
+        if candle_epoch <= g_epoch:
+            continue
+
+        if (
+            float(candle["low"]) <= zone_high
+            and float(candle["high"]) >= zone_low
+        ):
+            zone_was_touched = True
+
+        if not zone_was_touched:
+            continue
+
+        if direction == "BULLISH" and float(candle["high"]) >= target:
+            return True
+
+        if direction == "BEARISH" and float(candle["low"]) <= target:
             return True
 
     return False
 
+
+def trade_already_finished(structure, candles):
+    """
+    After an entry exists, replay later candles.
+    Return (True, reason) if SL or TP3 already happened.
+    """
+    if not structure.get("entry_epoch"):
+        return False, ""
+
+    if not structure.get("g"):
+        return False, ""
+
+    plan = active_trade_plan(
+        structure,
+        candles,
+    )
+    entry_epoch = int(structure["entry_epoch"])
+    direction = structure["direction"]
+    stop_loss = float(plan["stop_loss"])
+    tp3 = float(plan["tp3"])
+
+    for candle in candles:
+        candle_epoch = int(candle["epoch"])
+
+        if candle_epoch <= entry_epoch:
+            continue
+
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        if direction == "BULLISH":
+            if low <= stop_loss:
+                return True, "historical_sl_already_hit"
+
+            if high >= tp3:
+                return True, "historical_tp_already_hit"
+        else:
+            if high >= stop_loss:
+                return True, "historical_sl_already_hit"
+
+            if low <= tp3:
+                return True, "historical_tp_already_hit"
+
+    return False, ""
 
 # ============================================================
 # TELEGRAM TEXT
@@ -3336,6 +3452,18 @@ def run_scan(
                 candles,
             )
 
+        if structure.get("stage") == "ACTIVE":
+            finished, finish_reason = trade_already_finished(
+                structure,
+                candles,
+            )
+
+        if finished:
+                mark_invalid(
+                    structure,
+                    finish_reason,
+                )
+                
         if structure["state"] == "INVALID":
             # Send cancellation only for a live plan.
             if (
