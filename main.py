@@ -4761,7 +4761,8 @@ def structures_api():
         ]
     )
 
-    @app.post("/structures/close")
+
+@app.post("/structures/close")
 def close_structure_api():
     if not strict_admin_authorized():
         return jsonify(
@@ -4818,13 +4819,14 @@ def close_structure_api():
             }
         ), 400
 
-    # Do not let the scanner save/update this structure
-    # at the exact same time as the manual close request.
     if not SCAN_LOCK.acquire(blocking=False):
         return jsonify(
             {
                 "ok": False,
-                "error": "Scanner is busy. Try again in a few seconds.",
+                "error": (
+                    "Scanner is busy. "
+                    "Try again in a few seconds."
+                ),
             }
         ), 409
 
@@ -4847,23 +4849,17 @@ def close_structure_api():
             body.get("reason", "")
         ).strip() or default_reason
 
-        # Notify Telegram users if this structure already has
-        # an F/G/Active message chain.
         send_cancel_notifications(
             structure,
             reason,
         )
 
-        # Stop future Telegram TP/SL monitoring.
         close_trade_alerts_for_structure(
             structure_key_value,
             trade_state,
             reason,
         )
 
-        # Keep the key in the database as CLOSED.
-        # This prevents the engine from rediscovering
-        # exactly the same old historical setup.
         close_structure_by_key(
             structure_key_value,
             reason,
@@ -4884,6 +4880,7 @@ def close_structure_api():
 
     finally:
         SCAN_LOCK.release()
+
 
 @app.route(
     "/scanner/targets",
