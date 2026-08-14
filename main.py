@@ -983,7 +983,18 @@ def delete_structure(structure):
         finally:
             connection.close()
 
-
+def delete_structure_by_key(structure_key_value):
+    with DB_LOCK:
+        connection = db()
+        try:
+            connection.execute(
+                "DELETE FROM structures WHERE structure_key=?",
+                (structure_key_value,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+            
 # ============================================================
 # DERIV CANDLES
 # ============================================================
@@ -3095,35 +3106,39 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 else "SL_HIT"
             )
 
-        with DB_LOCK:
-            connection = db()
+            with DB_LOCK:
+                connection = db()
 
-            try:
-                connection.execute(
-                    """
-                    UPDATE telegram_trade_alerts
-                    SET plan_json=?,
-                        trade_state=?,
-                        last_event=?,
-                        updated_epoch=?
-                    WHERE id=?
-                    """,
-                    (
-                        json.dumps(
-                            plan,
-                            separators=(",", ":"),
+                try:
+                    connection.execute(
+                        """
+                        UPDATE telegram_trade_alerts
+                        SET plan_json=?,
+                            trade_state=?,
+                            last_event=?,
+                            updated_epoch=?
+                        WHERE id=?
+                        """,
+                        (
+                            json.dumps(
+                                plan,
+                                separators=(",", ":"),
+                            ),
+                            plan["trade_state"],
+                            events[-1][0],
+                            int(time.time()),
+                            row["id"],
                         ),
-                        plan["trade_state"],
-                        events[-1][0],
-                        int(time.time()),
-                        row["id"],
-                    ),
-                )
+                    )
 
-                connection.commit()
+                    connection.commit()
 
-            finally:
-                connection.close()
+                finally:
+                    connection.close()
+
+            # Free this pattern slot — the engine can now look
+            # for a brand-new A -> G setup on this pair/timeframe.
+            delete_structure_by_key(row["structure_key"])
 
     return total_events
 
