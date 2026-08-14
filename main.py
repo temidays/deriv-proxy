@@ -3759,7 +3759,7 @@ def scanner_settings():
             canonical_symbol(pair)
             for pair in environment_list(
                 "SCANNER_PAIRS",
-                "R_100",
+                "",
             )
             if canonical_symbol(pair)
         ]
@@ -3770,7 +3770,7 @@ def scanner_settings():
             timeframe.upper()
             for timeframe in environment_list(
                 "SCANNER_TIMEFRAMES",
-                "M15",
+                "",
             )
             if timeframe.upper() in TIMEFRAME_MAP
         ]
@@ -3916,11 +3916,13 @@ def database_scanner_targets():
 
 def effective_scanner_targets(config=None):
     stored = database_scanner_targets()
-
     if stored:
         return stored
 
     config = config or scanner_settings()
+
+    if not config["pairs"] or not config["timeframes"]:
+        return []
 
     return [
         {
@@ -4153,13 +4155,19 @@ def scanner_loop():
 
             else:
                 try:
-                    targets = effective_scanner_targets(
-                        config
-                    )
+targets = effective_scanner_targets(
+    config
+)
 
-                    for target in targets:
-                        if SCANNER_STOP.is_set():
-                            break
+if not targets:
+    print(
+        "[Scanner] No targets configured. "
+        "Set pairs in the app or SCANNER_PAIRS env var."
+    )
+else:
+    for target in targets:
+        if SCANNER_STOP.is_set():
+            break
 
                         pair = target["pair"]
                         timeframe = target["timeframe"]
