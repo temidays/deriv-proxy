@@ -3214,6 +3214,30 @@ def process_structure_events(
 # SCAN ENGINE
 # ============================================================
 
+def stage_rank(structure):
+    """Higher number = more advanced in the A → G pipeline."""
+    stage = structure.get(
+        "stage",
+        structure.get("state", ""),
+    )
+    return {
+        "WAITING_FOR_BOS": 0,
+        "WAITING_FOR_E": 1,
+        "WAITING_FOR_F": 2,
+        "WAITING_FOR_G": 3,
+        "WAITING_FOR_ENTRY": 4,
+        "ACTIVE": 5,
+        "COMPLETE": 6,
+    }.get(stage, -1)
+
+
+def latest_point_epoch(structure):
+    """Return the epoch of the most recent point in the structure."""
+    for key in ("g", "f", "e", "d", "b", "a"):
+        pt = structure.get(key)
+        if pt:
+            return int(pt.get("epoch", 0))
+    return 0
 def run_scan(
     pair,
     timeframe,
@@ -3238,7 +3262,7 @@ def run_scan(
         timeframe,
     )
 
-    # Keep the newest active candidate per direction.
+    # Keep the MOST ADVANCED active candidate per direction.
     for direction in (
         "BULLISH",
         "BEARISH",
@@ -3253,12 +3277,13 @@ def run_scan(
                 "CLOSED",
             )
         ]
-
         active.sort(
-            key=lambda item: item["b"]["epoch"],
+            key=lambda item: (
+                stage_rank(item),
+                latest_point_epoch(item),
+            ),
             reverse=True,
         )
-
         for obsolete in active[1:]:
             delete_structure(obsolete)
 
@@ -3357,22 +3382,33 @@ def run_scan(
         for item in memory
     }
 
-    # Discover candidates if direction has no active one.
+    # Discover candidates if direction has no well-advanced structure.
     for direction in (
         "BULLISH",
         "BEARISH",
     ):
-        has_active = any(
-            item["direction"] == direction
+        active_for_direction = [
+            item
+            for item in memory
+            if item["direction"] == direction
             and item["state"] not in (
                 "COMPLETE",
                 "INVALID",
                 "CLOSED",
             )
-            for item in memory
+        ]
+
+        best_rank = max(
+            (
+                stage_rank(item)
+                for item in active_for_direction
+            ),
+            default=-1,
         )
 
-        if has_active:
+        # If we already have a structure at F or beyond,
+        # don't waste time discovering basic A-C-B patterns.
+        if best_rank >= 3:
             continue
 
         candidates = discover_abc(
