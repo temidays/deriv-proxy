@@ -2249,7 +2249,7 @@ def confirm_closed_entry(structure, candles):
     return True
 
     
-    def setup_already_ran_to_targets(
+def setup_already_ran_to_targets(
     structure,
     candles,
     g_epoch,
@@ -2257,8 +2257,8 @@ def confirm_closed_entry(structure, candles):
     zone_high,
 ):
     """
-    Price touched the A-zone after G, never printed a valid entry,
-    then already ran to D / E / G. The pullback is gone.
+    Price touched the A-zone after G, then already reached
+    a target without producing a valid entry candle.
     """
     direction = structure["direction"]
     targets = []
@@ -2274,7 +2274,7 @@ def confirm_closed_entry(structure, candles):
         if direction == "BULLISH" and price > zone_high:
             targets.append(price)
 
-        if direction == "BEARISH" and price < zone_low:
+        elif direction == "BEARISH" and price < zone_low:
             targets.append(price)
 
     if not targets:
@@ -2294,19 +2294,28 @@ def confirm_closed_entry(structure, candles):
         if candle_epoch <= g_epoch:
             continue
 
+        candle_low = float(candle["low"])
+        candle_high = float(candle["high"])
+
         if (
-            float(candle["low"]) <= zone_high
-            and float(candle["high"]) >= zone_low
+            candle_low <= zone_high
+            and candle_high >= zone_low
         ):
             zone_was_touched = True
 
         if not zone_was_touched:
             continue
 
-        if direction == "BULLISH" and float(candle["high"]) >= target:
+        if (
+            direction == "BULLISH"
+            and candle_high >= target
+        ):
             return True
 
-        if direction == "BEARISH" and float(candle["low"]) <= target:
+        if (
+            direction == "BEARISH"
+            and candle_low <= target
+        ):
             return True
 
     return False
@@ -2314,8 +2323,8 @@ def confirm_closed_entry(structure, candles):
 
 def trade_already_finished(structure, candles):
     """
-    After an entry exists, replay later candles.
-    Return (True, reason) if SL or TP3 already happened.
+    Replay candles after entry and detect historical TP3 or SL.
+    Returns: (finished, reason)
     """
     if not structure.get("entry_epoch"):
         return False, ""
@@ -2327,6 +2336,7 @@ def trade_already_finished(structure, candles):
         structure,
         candles,
     )
+
     entry_epoch = int(structure["entry_epoch"])
     direction = structure["direction"]
     stop_loss = float(plan["stop_loss"])
@@ -2347,6 +2357,7 @@ def trade_already_finished(structure, candles):
 
             if high >= tp3:
                 return True, "historical_tp_already_hit"
+
         else:
             if high >= stop_loss:
                 return True, "historical_sl_already_hit"
