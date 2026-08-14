@@ -3252,65 +3252,7 @@ def run_scan(
         timeframe,
     )
 
-    # Advance existing candidates.
-    for structure in list(memory):
-        if structure["state"] in (
-            "INVALID",
-            "CLOSED",
-        ):
-            continue
 
-        previous_stage = structure.get(
-            "stage",
-            structure["state"],
-        )
-
-        previous_f_epoch = int(
-            structure["f"]["epoch"]
-        ) if structure.get("f") else 0
-
-        previous_g_epoch = int(
-            structure["g"]["epoch"]
-        ) if structure.get("g") else 0
-
-        if not structure.get("live_from_epoch"):
-            structure["live_from_epoch"] = latest_epoch
-
-        structure = advance_structure(
-            structure=structure,
-            candles=candles,
-            bos_mode=bos_mode,
-            expansion_atr=expansion_atr,
-            displacement_atr=displacement_atr,
-            swing_strength=strength,
-            min_atr_move=min_atr,
-            fib_ratio=fib_ratio,
-        )
-
-        # After G, wait for a CLOSED A-zone rejection candle.
-        if structure.get("stage") == "WAITING_FOR_ENTRY":
-            confirm_closed_entry(
-                structure,
-                candles,
-            )
-
-        if structure["state"] == "INVALID":
-            # Send cancellation only for a live plan.
-            if (
-                structure.get("g")
-                and structure.get("g", {}).get("epoch", 0)
-                > structure.get("live_from_epoch", 0)
-            ):
-                send_cancel_notifications(
-                    structure,
-                    structure.get(
-                        "discard_reason",
-                        "structure invalidated",
-                    ),
-                )
-
-            delete_structure(structure)
-            continue
 
     # Advance existing candidates.
     for structure in list(memory):
@@ -3377,18 +3319,6 @@ def run_scan(
 
         if g_epoch_now and g_epoch_now != previous_g_epoch:
             completed_now.append(structure)
-
-        save(structure)
-
-        trade_events_now += process_structure_events(
-            structure,
-            previous_stage,
-            previous_f_epoch,
-            previous_g_epoch,
-            candles,
-        )
-
-        save(structure)
 
         save(structure)
 
