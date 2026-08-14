@@ -11,6 +11,9 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+def now_utc_string():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
 from flask import Flask, jsonify, request
 import websocket
 
