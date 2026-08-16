@@ -700,7 +700,8 @@ def save(structure):
         connection = db()
 
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 INSERT INTO structures(
                     structure_key,
@@ -786,6 +787,7 @@ def save(structure):
             )
 
             connection.commit()
+            cursor.close()
 
         except Exception:
             connection.rollback()
@@ -878,6 +880,9 @@ def structures_for(pair, timeframe):
             rows = cursor.fetchall()
             cursor.close()
 
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -892,7 +897,6 @@ def delete_structure(structure):
 
     with DB_LOCK:
         connection = db()
-
         try:
             cursor = connection.cursor()
             cursor.execute(
@@ -901,22 +905,30 @@ def delete_structure(structure):
                 WHERE structure_key=%s
                 """,
                 (key,),
-        )
+            )
             connection.commit()
-        cursor.close()
-
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
+
 
 def delete_structure_by_key(structure_key_value):
     with DB_LOCK:
         connection = db()
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 "DELETE FROM structures WHERE structure_key=%s",
                 (structure_key_value,),
             )
             connection.commit()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -924,14 +936,20 @@ def structure_for_key(structure_key_value):
     with DB_LOCK:
         connection = db()
         try:
-            row = connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 SELECT *
                 FROM structures
                 WHERE structure_key=%s
                 """,
                 (structure_key_value,),
-            ).fetchone()
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -951,7 +969,8 @@ def close_structure_by_key(structure_key_value, reason):
     with DB_LOCK:
         connection = db()
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 UPDATE structures
                 SET state='CLOSED',
@@ -967,6 +986,10 @@ def close_structure_by_key(structure_key_value, reason):
                 ),
             )
             connection.commit()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -985,7 +1008,8 @@ def close_trade_alerts_for_structure(
     with DB_LOCK:
         connection = db()
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 UPDATE telegram_trade_alerts
                 SET trade_state=%s,
@@ -1001,6 +1025,10 @@ def close_trade_alerts_for_structure(
                 ),
             )
             connection.commit()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -2679,13 +2707,17 @@ def active_telegram_users():
         connection = db()
 
         try:
-            return connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 SELECT chat_id
                 FROM telegram_users
                 WHERE active=1
                 """
-            ).fetchall()
+            )
+            result_rows = cursor.fetchall()
+            cursor.close()
+            return result_rows
 
         finally:
             connection.close()
@@ -2696,7 +2728,8 @@ def get_trade_alert(structure_key_value, chat_id):
         connection = db()
 
         try:
-            return connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 SELECT *
                 FROM telegram_trade_alerts
@@ -3104,7 +3137,10 @@ def monitor_trade_alerts(pair, timeframe, candles):
                     pair,
                     timeframe,
                 ),
-            ).fetchall()
+            )
+            result_rows = cursor.fetchall()
+            cursor.close()
+            return result_rows
         finally:
             connection.close()
 
@@ -3321,7 +3357,8 @@ def monitor_trade_alerts(pair, timeframe, candles):
             with DB_LOCK:
                 connection = db()
                 try:
-                    connection.execute(
+                    cursor = connection.cursor()
+                    cursor.execute(
                         """
                         UPDATE telegram_trade_alerts
                         SET plan_json=%s,
@@ -3342,6 +3379,10 @@ def monitor_trade_alerts(pair, timeframe, candles):
                         ),
                     )
                     connection.commit()
+                    cursor.close()
+                except Exception:
+                    connection.rollback()
+                    raise
                 finally:
                     connection.close()
 
@@ -3906,6 +3947,9 @@ def database_scanner_targets():
                 )
                 rows = cursor.fetchall()
                 cursor.close()
+            except Exception:
+                connection.rollback()
+                raise
             finally:
                 connection.close()
 
@@ -3990,7 +4034,8 @@ def replace_scanner_targets(pairs, timeframes):
         connection = db()
 
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 "DELETE FROM scanner_targets"
             )
 
@@ -4015,7 +4060,11 @@ def replace_scanner_targets(pairs, timeframes):
                 )
 
             connection.commit()
+            cursor.close()
 
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -4344,6 +4393,9 @@ def health_api():
                 plans_count = cursor.fetchone()["cnt"]
 
                 cursor.close()
+            except Exception:
+                connection.rollback()
+                raise
             finally:
                 connection.close()
 
@@ -4745,6 +4797,9 @@ def structures_api():
             rows = cursor.fetchall()
             cursor.close()
 
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -5184,6 +5239,9 @@ def telegram_unregister_api():
             connection.commit()
             cursor.close()
 
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -5298,6 +5356,9 @@ def telegram_plans_api():
             rows = cursor.fetchall()
             cursor.close()
 
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
