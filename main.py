@@ -3886,34 +3886,20 @@ def database_scanner_targets():
     try:
         with DB_LOCK:
             connection = db()
-
             try:
-                rows = connection.execute(
+                cursor = connection.cursor()
+                cursor.execute(
                     """
                     SELECT pair, timeframe
                     FROM scanner_targets
                     WHERE active=1
                     ORDER BY pair, timeframe
                     """
-                ).fetchall()
-
+                )
+                rows = cursor.fetchall()
+                cursor.close()
             finally:
                 connection.close()
-
-        return [
-            {
-                "pair": row["pair"],
-                "timeframe": row["timeframe"],
-            }
-            for row in rows
-        ]
-
-    except Exception as exc:
-        print(
-            f"[Scanner] Target lookup failed: {exc}"
-        )
-        return []
-
 
 def effective_scanner_targets(config=None):
     stored = database_scanner_targets()
@@ -4304,31 +4290,35 @@ def health_api():
     except Exception:
         targets = []
 
-    try:
         with DB_LOCK:
             connection = db()
-
             try:
-                structures_count = connection.execute(
-                    "SELECT COUNT(*) FROM structures"
-                ).fetchone()[0]
+                cursor = connection.cursor()
 
-                users_count = connection.execute(
+                cursor.execute(
+                    "SELECT COUNT(*) FROM structures"
+                )
+                structures_count = cursor.fetchone()[0]
+
+                cursor.execute(
                     """
                     SELECT COUNT(*)
                     FROM telegram_users
                     WHERE active=1
                     """
-                ).fetchone()[0]
+                )
+                users_count = cursor.fetchone()[0]
 
-                plans_count = connection.execute(
+                cursor.execute(
                     """
                     SELECT COUNT(*)
                     FROM telegram_trade_alerts
                     WHERE trade_state='ACTIVE'
                     """
-                ).fetchone()[0]
+                )
+                plans_count = cursor.fetchone()[0]
 
+                cursor.close()
             finally:
                 connection.close()
 
@@ -4728,10 +4718,10 @@ def structures_api():
         connection = db()
 
         try:
-            rows = connection.execute(
-                sql,
-                arguments,
-            ).fetchall()
+        cursor = connection.cursor()
+        cursor.execute(sql, arguments)
+        rows = cursor.fetchall()
+        cursor.close()
 
         finally:
             connection.close()
@@ -5102,28 +5092,29 @@ def telegram_register_api():
         connection = db()
 
         try:
-            connection.execute(
-                """
-                INSERT INTO telegram_users(
-                    chat_id,
-                    username,
-                    active,
-                    created_epoch
-                )
-                VALUES(%s,%s,1,%s)
-                ON CONFLICT(chat_id)
-                DO UPDATE SET
-                    username=excluded.username,
-                    active=1
-                """,
-                (
-                    str(chat_id),
-                    username,
-                    int(time.time()),
-                ),
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            INSERT INTO telegram_users(
+                chat_id,
+                username,
+                active,
+                created_epoch
             )
-
-            connection.commit()
+            VALUES(%s,%s,1,%s)
+            ON CONFLICT(chat_id)
+            DO UPDATE SET
+                username=EXCLUDED.username,
+                active=1
+            """,
+            (
+                str(chat_id),
+                username,
+                int(time.time()),
+            ),
+        )
+        connection.commit()
+        cursor.close()
 
         finally:
             connection.close()
@@ -5159,16 +5150,17 @@ def telegram_unregister_api():
         connection = db()
 
         try:
-            connection.execute(
-                """
-                UPDATE telegram_users
-                SET active=0
-                WHERE chat_id=%s
-                """,
-                (str(chat_id),),
-            )
-
-            connection.commit()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            UPDATE telegram_users
+            SET active=0
+            WHERE chat_id=%s
+            """,
+            (str(chat_id),),
+        )
+        connection.commit()
+        cursor.close()
 
         finally:
             connection.close()
@@ -5272,14 +5264,17 @@ def telegram_plans_api():
         connection = db()
 
         try:
-            rows = connection.execute(
-                """
-                SELECT *
-                FROM telegram_trade_alerts
-                ORDER BY updated_epoch DESC
-                LIMIT 300
-                """
-            ).fetchall()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT *
+            FROM telegram_trade_alerts
+            ORDER BY updated_epoch DESC
+            LIMIT 300
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
 
         finally:
             connection.close()
@@ -5327,35 +5322,34 @@ def admin_reset_api():
         connection = db()
 
         try:
-            if raw_pair and timeframe:
-                connection.execute(
-                    """
-                    DELETE FROM structures
-                    WHERE pair=%s AND timeframe=%s
-                    """,
-                    (
-                        canonical_symbol(raw_pair),
-                        timeframe.upper(),
-                    ),
-                )
-
-            elif raw_pair:
-                connection.execute(
-                    """
-                    DELETE FROM structures
-                    WHERE pair=%s
-                    """,
-                    (
-                        canonical_symbol(raw_pair),
-                    ),
-                )
-
-            else:
-                connection.execute(
-                    "DELETE FROM structures"
-                )
-
-            connection.commit()
+        cursor = connection.cursor()
+        if raw_pair and timeframe:
+            cursor.execute(
+                """
+                DELETE FROM structures
+                WHERE pair=%s AND timeframe=%s
+                """,
+                (
+                    canonical_symbol(raw_pair),
+                    timeframe.upper(),
+                ),
+            )
+        elif raw_pair:
+            cursor.execute(
+                """
+                DELETE FROM structures
+                WHERE pair=%s
+                """,
+                (
+                    canonical_symbol(raw_pair),
+                ),
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM structures"
+            )
+        connection.commit()
+        cursor.close()
 
         finally:
             connection.close()
@@ -5414,43 +5408,48 @@ def admin_database_api():
 
     with DB_LOCK:
         connection = db()
-
         try:
-            structures = connection.execute(
-                "SELECT COUNT(*) FROM structures"
-            ).fetchone()[0]
+            cursor = connection.cursor()
 
-            complete = connection.execute(
+            cursor.execute("SELECT COUNT(*) FROM structures")
+            structures = cursor.fetchone()[0]
+
+            cursor.execute(
                 """
                 SELECT COUNT(*)
                 FROM structures
                 WHERE state='COMPLETE'
                 """
-            ).fetchone()[0]
+            )
+            complete = cursor.fetchone()[0]
 
-            users = connection.execute(
+            cursor.execute(
                 """
                 SELECT COUNT(*)
                 FROM telegram_users
                 WHERE active=1
                 """
-            ).fetchone()[0]
+            )
+            users = cursor.fetchone()[0]
 
-            plans = connection.execute(
+            cursor.execute(
                 """
                 SELECT COUNT(*)
                 FROM telegram_trade_alerts
                 """
-            ).fetchone()[0]
+            )
+            plans = cursor.fetchone()[0]
 
-            active_plans = connection.execute(
+            cursor.execute(
                 """
                 SELECT COUNT(*)
                 FROM telegram_trade_alerts
                 WHERE trade_state='ACTIVE'
                 """
-            ).fetchone()[0]
+            )
+            active_plans = cursor.fetchone()[0]
 
+            cursor.close()
         finally:
             connection.close()
 
