@@ -1072,6 +1072,10 @@ def get_candles(symbol, granularity, count=500):
         on_open=on_open,
         on_message=on_message,
         on_error=on_error,
+        header={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Origin": "https://app.deriv.com",
+        }
     )
 
     worker = threading.Thread(
