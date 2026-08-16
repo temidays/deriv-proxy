@@ -60,7 +60,10 @@ ADMIN_KEY = os.environ.get(
 
 DEFAULT_SCANNER_INTERVAL = 120
 DEFAULT_CANDLE_COUNT = 1000
-
+# Maximum active structures tracked per direction per pair/timeframe
+MAX_STRUCTURES_PER_DIRECTION = int(
+    os.environ.get("MAX_STRUCTURES_PER_DIRECTION", "3")
+)
 # G must reach at least this percentage of the B -> E range.
 # 0.90 means 90%, while touching or exceeding E is stronger.
 G_MIN_REACH = max(
@@ -3522,7 +3525,8 @@ def run_scan(
         timeframe,
     )
 
-    # Keep the MOST ADVANCED active candidate per direction.
+    # Keep the most advanced candidates per direction.
+    # Allow up to MAX_STRUCTURES_PER_DIRECTION active at once.
     for direction in (
         "BULLISH",
         "BEARISH",
@@ -3544,7 +3548,8 @@ def run_scan(
             ),
             reverse=True,
         )
-        for obsolete in active[1:]:
+        # Delete anything beyond the allowed maximum
+        for obsolete in active[MAX_STRUCTURES_PER_DIRECTION:]:
             delete_structure(obsolete)
 
     memory = structures_for(
@@ -3664,7 +3669,7 @@ def run_scan(
         for item in memory
     }
 
-    # Discover candidates if direction has no well-advanced structure.
+    # Discover new candidates if we have room for more.
     for direction in (
         "BULLISH",
         "BEARISH",
@@ -3680,6 +3685,15 @@ def run_scan(
             )
         ]
 
+        # How many slots are still available
+        available_slots = (
+            MAX_STRUCTURES_PER_DIRECTION
+            - len(active_for_direction)
+        )
+
+        if available_slots <= 0:
+            continue
+
         best_rank = max(
             (
                 stage_rank(item)
@@ -3688,9 +3702,9 @@ def run_scan(
             default=-1,
         )
 
-        # If we already have a structure at F or beyond,
-        # don't waste time discovering basic A-C-B patterns.
-        if best_rank >= 3:
+        # If ALL slots are filled with G-or-beyond structures
+        # do not bother discovering basic patterns
+        if best_rank >= 4 and len(active_for_direction) >= MAX_STRUCTURES_PER_DIRECTION:
             continue
 
         candidates = discover_abc(
@@ -3747,7 +3761,46 @@ def run_scan(
 
             # Historical F/G are context only and do not create an
             # old alert immediately.
-            break
+        discovered = 0
+
+        for candidate in candidates:
+            if discovered >= available_slots:
+                break
+
+            key = structure_key(candidate)
+
+            if key in known_keys:
+                continue
+
+            candidate["live_from_epoch"] = latest_epoch
+            candidate["context_only"] = True
+
+            previous_stage = candidate["stage"]
+
+            candidate = advance_structure(
+                structure=candidate,
+                candles=candles,
+                bos_mode=bos_mode,
+                expansion_atr=expansion_atr,
+                displacement_atr=displacement_atr,
+                swing_strength=strength,
+                min_atr_move=min_atr,
+                fib_ratio=fib_ratio,
+            )
+
+            if candidate.get("stage") == "WAITING_FOR_ENTRY":
+                confirm_closed_entry(
+                    candidate,
+                    candles,
+                )
+
+            if candidate["state"] == "INVALID":
+                continue
+
+            save(candidate)
+            known_keys.add(key)
+            memory.append(candidate)
+            discovered += 1
 
     # Monitor active trade plans for TP/SL.
     for target in (
