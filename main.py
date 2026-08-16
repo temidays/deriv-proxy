@@ -5106,8 +5106,8 @@ def telegram_register_api():
         connection = db()
 
         try:
-        cursor = connection.cursor()
-        cursor.execute(
+            cursor = connection.cursor()
+            cursor.execute(
             """
             INSERT INTO telegram_users(
                 chat_id,
