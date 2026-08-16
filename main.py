@@ -2690,6 +2690,36 @@ def trade_event_text(plan, event, price, candle_epoch):
         ]
     )
 
+def breakeven_message_text(plan, tp1_price, candle_epoch):
+    icon = (
+        "🟢"
+        if plan["direction"] == "BULLISH"
+        else "🔴"
+    )
+    return "\n".join(
+        [
+            f"{icon} <b>TP1 HIT — MOVE SL TO BREAK EVEN</b>",
+            "",
+            f"Symbol: <b>{plan['pair']}</b>",
+            f"Timeframe: <b>{plan['timeframe']}</b>",
+            f"Direction: <b>{plan['direction']}</b>",
+            "",
+            f"TP1 reached: <b>{tp1_price}</b>",
+            f"Candle time: <b>{epoch_to_local(candle_epoch)}</b>",
+            "",
+            "────────────────────",
+            "🛡 Action required:",
+            f"Move your Stop Loss to <b>{plan['entry']}</b> (your entry price)",
+            "This locks in a risk-free trade.",
+            "────────────────────",
+            "",
+            f"TP2 target: <b>{plan['tp2']}</b>",
+            f"TP3 target: <b>{plan['tp3']}</b>",
+            "",
+            f"Message time: <b>{epoch_to_local(int(time.time()))}</b>",
+        ]
+    )
+
 
 def cancel_message_text(structure, reason):
     return "\n".join(
@@ -3207,7 +3237,6 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
     with DB_LOCK:
         connection = db()
-
         try:
             rows = connection.execute(
                 """
@@ -3222,7 +3251,6 @@ def monitor_trade_alerts(pair, timeframe, candles):
                     timeframe,
                 ),
             ).fetchall()
-
         finally:
             connection.close()
 
@@ -3236,24 +3264,17 @@ def monitor_trade_alerts(pair, timeframe, candles):
             continue
 
         try:
-            plan = json.loads(
-                row["plan_json"]
-            )
+            plan = json.loads(row["plan_json"])
         except Exception:
             continue
 
-        entry_epoch = int(
-            plan.get("entry_epoch", 0)
-        )
-
+        entry_epoch = int(plan.get("entry_epoch", 0))
         direction = plan["direction"]
         events = []
         close_trade = False
 
         for candle in candles:
-            candle_epoch = int(
-                candle["epoch"]
-            )
+            candle_epoch = int(candle["epoch"])
 
             if candle_epoch <= entry_epoch:
                 continue
@@ -3262,7 +3283,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
             low = float(candle["low"])
 
             if direction == "BULLISH":
-                # Conservative: SL first if both are touched.
+                # SL first — conservative
                 if (
                     not plan.get("sl_hit")
                     and low <= float(plan["stop_loss"])
@@ -3291,6 +3312,21 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
+                    # Break-even suggestion
+                    try:
+                        tg_send(
+                            row["chat_id"],
+                            breakeven_message_text(
+                                plan,
+                                plan["tp1"],
+                                candle_epoch,
+                            ),
+                            reply_to_message_id=row["active_message_id"],
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[Telegram] Break-even message failed: {exc}"
+                        )
 
                 if (
                     not plan.get("tp2_hit")
@@ -3322,6 +3358,8 @@ def monitor_trade_alerts(pair, timeframe, candles):
                     break
 
             else:
+                # BEARISH
+                # SL first — conservative
                 if (
                     not plan.get("sl_hit")
                     and high >= float(plan["stop_loss"])
@@ -3350,6 +3388,21 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
+                    # Break-even suggestion
+                    try:
+                        tg_send(
+                            row["chat_id"],
+                            breakeven_message_text(
+                                plan,
+                                plan["tp1"],
+                                candle_epoch,
+                            ),
+                            reply_to_message_id=row["active_message_id"],
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[Telegram] Break-even message failed: {exc}"
+                        )
 
                 if (
                     not plan.get("tp2_hit")
@@ -3413,7 +3466,6 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
             with DB_LOCK:
                 connection = db()
-
                 try:
                     connection.execute(
                         """
@@ -3435,14 +3487,11 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             row["id"],
                         ),
                     )
-
                     connection.commit()
-
                 finally:
                     connection.close()
 
-            # Free this pattern slot — the engine can now look
-            # for a brand-new A -> G setup on this pair/timeframe.
+            # Free this pattern slot
             delete_structure_by_key(row["structure_key"])
 
     return total_events
