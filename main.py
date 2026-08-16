@@ -4298,12 +4298,15 @@ def health_api():
     config = scanner_settings()
 
     try:
-        targets = effective_scanner_targets(
-            config
-        )
+        targets = effective_scanner_targets(config)
     except Exception:
         targets = []
 
+    structures_count = 0
+    users_count = 0
+    plans_count = 0
+
+    try:
         with DB_LOCK:
             connection = db()
             try:
@@ -4338,34 +4341,31 @@ def health_api():
 
     except Exception as exc:
         print(f"[Health] DB error: {exc}")
-        structures_count = 0
-        users_count = 0
-        plans_count = 0
 
     return jsonify(
         {
             "ok": True,
             "engine": "TradeSignal Structure Scanner V9",
-            "server_time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "server_time_utc": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            ),
             "chronological_order": (
                 "A -> C -> B -> D -> E -> F -> G"
             ),
-            "database_type": "postgresql" if DB_IS_PERSISTENT else "none",
+            "database_type": (
+                "postgresql" if DB_IS_PERSISTENT else "none"
+            ),
             "database_persistent": DB_IS_PERSISTENT,
             "stored_structures": structures_count,
             "telegram_users": users_count,
             "active_trade_plans": plans_count,
-            "telegram_configured": bool(
-                TELEGRAM_BOT_TOKEN
-            ),
+            "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
             "continuous_scanner": bool(
                 SCANNER_THREAD
                 and SCANNER_THREAD.is_alive()
                 and not SCANNER_STOP.is_set()
             ),
-            "scanner_interval_seconds": (
-                config["interval"]
-            ),
+            "scanner_interval_seconds": config["interval"],
             "g_min_reach": G_MIN_REACH,
             "targets": targets,
         }
