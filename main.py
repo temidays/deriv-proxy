@@ -5173,8 +5173,8 @@ def telegram_unregister_api():
             """,
             (str(chat_id),),
         )
-        connection.commit()
-        cursor.close()
+            connection.commit()
+            cursor.close()
 
         finally:
             connection.close()
