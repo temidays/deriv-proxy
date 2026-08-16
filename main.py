@@ -44,8 +44,8 @@ app = Flask(__name__)
 
 DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 DERIV_WS_URL = (
-    "wss://ws.derivws.com/websockets/v3"
-    f"%sapp_id={DERIV_APP_ID}"
+    "wss://green.derivws.com/websockets/v3"
+    f"?app_id={DERIV_APP_ID}"
 )
 
 TELEGRAM_BOT_TOKEN = os.environ.get(
