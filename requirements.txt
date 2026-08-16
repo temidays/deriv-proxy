@@ -1,4 +1,4 @@
 flask
 websocket-client
 gunicorn
-psycopg2-binary
+psycopg2
