@@ -860,20 +860,23 @@ def structures_for(pair, timeframe):
         connection = db()
 
         try:
-            rows = connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 SELECT *
                 FROM structures
                 WHERE pair=%s
-                  AND timeframe=%s
-                  AND state != 'INVALID'
+                AND timeframe=%s
+                AND state != 'INVALID'
                 ORDER BY created_epoch ASC
                 """,
                 (
-                    canonical_pair,
-                    canonical_tf,
+                canonical_pair,
+                canonical_tf,
                 ),
-            ).fetchall()
+        )
+        rows = cursor.fetchall()
+        cursor.close()
 
         finally:
             connection.close()
@@ -891,15 +894,16 @@ def delete_structure(structure):
         connection = db()
 
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 DELETE FROM structures
                 WHERE structure_key=%s
                 """,
                 (key,),
-            )
-
-            connection.commit()
+        )
+        connection.commit()
+        cursor.close()
 
         finally:
             connection.close()
