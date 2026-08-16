@@ -2,7 +2,8 @@ import codecs
 import encodings
 import json
 import os
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import tempfile
 import threading
 import time
@@ -44,7 +45,7 @@ app = Flask(__name__)
 DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 DERIV_WS_URL = (
     "wss://ws.derivws.com/websockets/v3"
-    f"?app_id={DERIV_APP_ID}"
+    f"%sapp_id={DERIV_APP_ID}"
 )
 
 TELEGRAM_BOT_TOKEN = os.environ.get(
@@ -279,89 +280,13 @@ SCANNER_DIAGNOSTICS = {
 # DATABASE PATH (optimized for free Render)
 # ============================================================
 
-def path_is_writable(candidate):
-    directory = os.path.dirname(os.path.abspath(candidate)) or "."
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DB_IS_PERSISTENT = bool(DATABASE_URL)
 
-    try:
-        if not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
-    except Exception:
-        return False
-
-    if not os.access(directory, os.W_OK):
-        return False
-
-    probe = os.path.join(directory, ".trade_signal_probe")
-
-    try:
-        with open(probe, "w") as handle:
-            handle.write("ok")
-
-        os.remove(probe)
-        return True
-
-    except Exception:
-        return False
-
-
-def resolve_db_path():
-    requested = os.environ.get("DB_PATH", "").strip()
-
-    candidates = []
-
-    if requested:
-        candidates.append(requested)
-
-    # Prefer /tmp on free tier (most reliable ephemeral location)
-    candidates.append(
-        os.path.join(
-            tempfile.gettempdir(),
-            "structure_memory.db",
-        )
-    )
-
-    # This is only writable when a Render persistent disk exists.
-    candidates.append("/var/data/structure_memory.db")
-
-    # Normal Render project directory. Ephemeral, but writable.
-    candidates.append(
-        os.path.join(
-            os.getcwd(),
-            "structure_memory.db",
-        )
-    )
-
-    for candidate in candidates:
-        if path_is_writable(candidate):
-            chosen = os.path.abspath(candidate)
-
-            if requested and chosen != os.path.abspath(requested):
-                print(
-                    f"[DB] Requested path is not writable: {requested}"
-                )
-                print(f"[DB] Using fallback path: {chosen}")
-
-            return chosen
-
-    fallback = os.path.join(
-        tempfile.gettempdir(),
-        "structure_memory.db",
-    )
-
-    print(f"[DB] Using final fallback: {fallback}")
-    return fallback
-
-
-DB_PATH = resolve_db_path()
-DB_IS_PERSISTENT = DB_PATH.startswith("/var/data")
-
-print(f"[DB] Using database: {DB_PATH}")
-
-if not DB_IS_PERSISTENT:
-    print(
-        "[DB] WARNING: database storage is ephemeral. "
-        "Telegram registrations and trade plans can reset after redeploy."
-    )
+if DB_IS_PERSISTENT:
+    print(f"[DB] Using PostgreSQL database")
+else:
+    print("[DB] WARNING: No DATABASE_URL set. Using in-memory fallback.")
 
 
 # ============================================================
@@ -447,27 +372,18 @@ def epoch_to_local(epoch):
 # ============================================================
 
 def delete_database_files():
-    for suffix in (
-        "",
-        "-wal",
-        "-shm",
-        "-journal",
-    ):
-        path = DB_PATH + suffix
-
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-                print(f"[DB] Removed {path}")
-        except Exception as exc:
-            print(f"[DB] Could not remove {path}: {exc}")
+    # PostgreSQL — nothing to delete locally.
+    # Tables are dropped and recreated via create_schema.
+    print("[DB] PostgreSQL in use — no local files to delete.")
 
 
 def create_schema(connection):
-    connection.execute(
+    cursor = connection.cursor()
+
+    cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS structures(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             structure_key TEXT UNIQUE NOT NULL,
             pair TEXT NOT NULL,
             timeframe TEXT NOT NULL,
@@ -497,7 +413,7 @@ def create_schema(connection):
         """
     )
 
-    connection.execute(
+    cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS telegram_users(
             chat_id TEXT PRIMARY KEY,
@@ -508,7 +424,7 @@ def create_schema(connection):
         """
     )
 
-    connection.execute(
+    cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS scanner_targets(
             pair TEXT NOT NULL,
@@ -521,10 +437,10 @@ def create_schema(connection):
         """
     )
 
-    connection.execute(
+    cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS telegram_trade_alerts(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             structure_key TEXT NOT NULL,
             chat_id TEXT NOT NULL,
             pair TEXT,
@@ -543,39 +459,7 @@ def create_schema(connection):
         """
     )
 
-    # Migrations for databases created by older versions.
-    existing_columns = {
-        row[1]
-        for row in connection.execute(
-            "PRAGMA table_info(structures)"
-        ).fetchall()
-    }
-
-    migrations = {
-        "stage": "TEXT DEFAULT ''",
-        "context_only": "INTEGER DEFAULT 0",
-        "g_json": "TEXT",
-        "a_zone_low": "REAL",
-        "a_zone_high": "REAL",
-        "entry_price": "REAL",
-        "entry_epoch": "INTEGER DEFAULT 0",
-        "live_from_epoch": "INTEGER DEFAULT 0",
-        "discard_reason": "TEXT DEFAULT ''",
-    }
-
-    for column, definition in migrations.items():
-        if column not in existing_columns:
-            try:
-                connection.execute(
-                    f"ALTER TABLE structures ADD COLUMN "
-                    f"{column} {definition}"
-                )
-            except Exception as exc:
-                print(
-                    f"[DB] Migration skipped for {column}: {exc}"
-                )
-
-    connection.execute(
+    cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS
         idx_structures_pair_timeframe
@@ -583,7 +467,7 @@ def create_schema(connection):
         """
     )
 
-    connection.execute(
+    cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS
         idx_structures_state
@@ -591,7 +475,7 @@ def create_schema(connection):
         """
     )
 
-    connection.execute(
+    cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS
         idx_trade_alerts_state
@@ -600,71 +484,39 @@ def create_schema(connection):
     )
 
     connection.commit()
+    cursor.close()
 
 
 def open_database():
-    connection = sqlite3.connect(
-        DB_PATH,
-        timeout=60,
-        check_same_thread=False,
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "No DATABASE_URL configured."
+        )
+
+    connection = psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=30,
+        cursor_factory=psycopg2.extras.RealDictCursor,
     )
 
-    connection.row_factory = sqlite3.Row
-
-    try:
-        connection.execute("PRAGMA busy_timeout=60000")
-        connection.execute("PRAGMA journal_mode=DELETE")   # much better on free tier
-        connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA temp_store=MEMORY")
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA cache_size=-8000")
-    except sqlite3.DatabaseError:
-        pass
-
+    connection.autocommit = False
     create_schema(connection)
     return connection
 
 
 def db():
     connection = None
-
     try:
         connection = open_database()
-        connection.execute("SELECT 1")
         return connection
-
-    except sqlite3.DatabaseError as exc:
+    except Exception as exc:
         print(f"[DB] Database error: {exc}")
-        print("[DB] Rebuilding database")
-
         if connection is not None:
             try:
                 connection.close()
             except Exception:
                 pass
-
-        try:
-            delete_database_files()
-        except Exception:
-            pass
-
-        return open_database()
-
-
-try:
-    with DB_LOCK:
-        startup_connection = db()
-        startup_connection.close()
-
-    print(f"[DB] Ready at {DB_PATH}")
-
-except Exception as exc:
-    print(f"[DB] Startup database error: {exc}")
-    delete_database_files()
-
-    with DB_LOCK:
-        startup_connection = db()
-        startup_connection.close()
+        raise
 
 
 # ============================================================
@@ -945,10 +797,10 @@ def save(structure):
 
 def parse_json_point(row, column):
     value = row[column]
-
     if not value:
         return None
-
+    if isinstance(value, dict):
+        return value
     return json.loads(value)
 
 
@@ -966,11 +818,7 @@ def row_to_structure(row):
         "direction": row["direction"],
         "state": row["state"],
         "stage": stage,
-        "context_only": bool(
-            row["context_only"]
-            if "context_only" in row.keys()
-            else 0
-        ),
+        "context_only": bool(row.get("context_only", 0)),
         "a": parse_json_point(row, "a_json"),
         "b": parse_json_point(row, "b_json"),
         "c": parse_json_point(row, "c_json"),
@@ -985,9 +833,7 @@ def row_to_structure(row):
         "entry_epoch": int(row["entry_epoch"] or 0),
         "valid": bool(row["valid"]),
         "telegram_sent": bool(row["telegram_sent"]),
-        "live_from_epoch": int(
-            row["live_from_epoch"] or 0
-        ),
+        "live_from_epoch": int(row["live_from_epoch"] or 0),
         "discard_reason": row["discard_reason"] or "",
     }
 
@@ -1018,8 +864,8 @@ def structures_for(pair, timeframe):
                 """
                 SELECT *
                 FROM structures
-                WHERE pair=?
-                  AND timeframe=?
+                WHERE pair=%s
+                  AND timeframe=%s
                   AND state != 'INVALID'
                 ORDER BY created_epoch ASC
                 """,
@@ -1048,7 +894,7 @@ def delete_structure(structure):
             connection.execute(
                 """
                 DELETE FROM structures
-                WHERE structure_key=?
+                WHERE structure_key=%s
                 """,
                 (key,),
             )
@@ -1063,7 +909,7 @@ def delete_structure_by_key(structure_key_value):
         connection = db()
         try:
             connection.execute(
-                "DELETE FROM structures WHERE structure_key=?",
+                "DELETE FROM structures WHERE structure_key=%s",
                 (structure_key_value,),
             )
             connection.commit()
@@ -1078,7 +924,7 @@ def structure_for_key(structure_key_value):
                 """
                 SELECT *
                 FROM structures
-                WHERE structure_key=?
+                WHERE structure_key=%s
                 """,
                 (structure_key_value,),
             ).fetchone()
@@ -1106,9 +952,9 @@ def close_structure_by_key(structure_key_value, reason):
                 UPDATE structures
                 SET state='CLOSED',
                     stage='CLOSED',
-                    discard_reason=?,
-                    updated_epoch=?
-                WHERE structure_key=?
+                    discard_reason=%s,
+                    updated_epoch=%s
+                WHERE structure_key=%s
                 """,
                 (
                     reason,
@@ -1138,10 +984,10 @@ def close_trade_alerts_for_structure(
             connection.execute(
                 """
                 UPDATE telegram_trade_alerts
-                SET trade_state=?,
-                    last_event=?,
-                    updated_epoch=?
-                WHERE structure_key=?
+                SET trade_state=%s,
+                    last_event=%s,
+                    updated_epoch=%s
+                WHERE structure_key=%s
                 """,
                 (
                     trade_state,
@@ -2846,8 +2692,8 @@ def get_trade_alert(structure_key_value, chat_id):
                 """
                 SELECT *
                 FROM telegram_trade_alerts
-                WHERE structure_key=?
-                  AND chat_id=?
+                WHERE structure_key=%s
+                  AND chat_id=%s
                 """,
                 (
                     structure_key_value,
@@ -2893,7 +2739,7 @@ def save_trade_alert(
                     created_epoch,
                     updated_epoch
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(structure_key, chat_id)
                 DO UPDATE SET
                     f_message_id=CASE
@@ -3242,8 +3088,8 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 """
                 SELECT *
                 FROM telegram_trade_alerts
-                WHERE pair=?
-                  AND timeframe=?
+                WHERE pair=%s
+                  AND timeframe=%s
                   AND trade_state='ACTIVE'
                 """,
                 (
@@ -3470,11 +3316,11 @@ def monitor_trade_alerts(pair, timeframe, candles):
                     connection.execute(
                         """
                         UPDATE telegram_trade_alerts
-                        SET plan_json=?,
-                            trade_state=?,
-                            last_event=?,
-                            updated_epoch=?
-                        WHERE id=?
+                        SET plan_json=%s,
+                            trade_state=%s,
+                            last_event=%s,
+                            updated_epoch=%s
+                        WHERE id=%s
                         """,
                         (
                             json.dumps(
@@ -4150,7 +3996,7 @@ def replace_scanner_targets(pairs, timeframes):
                         created_epoch,
                         updated_epoch
                     )
-                    VALUES(?,?,1,?,?)
+                    VALUES(%s,%s,1,%s,%s)
                     """,
                     (
                         target["pair"],
@@ -4500,7 +4346,7 @@ def health_api():
             "chronological_order": (
                 "A -> C -> B -> D -> E -> F -> G"
             ),
-            "database_path": DB_PATH,
+            "database_type": "postgresql" if DB_IS_PERSISTENT else "none",
             "database_persistent": DB_IS_PERSISTENT,
             "stored_structures": structures_count,
             "telegram_users": users_count,
@@ -4857,7 +4703,7 @@ def structures_api():
     if pairs:
         clauses.append(
             "pair IN ("
-            + ",".join("?" for _ in pairs)
+            + ",".join("%s" for _ in pairs)
             + ")"
         )
         arguments.extend(pairs)
@@ -4865,7 +4711,7 @@ def structures_api():
     if timeframes:
         clauses.append(
             "timeframe IN ("
-            + ",".join("?" for _ in timeframes)
+            + ",".join("%s" for _ in timeframes)
             + ")"
         )
         arguments.extend(timeframes)
@@ -5264,7 +5110,7 @@ def telegram_register_api():
                     active,
                     created_epoch
                 )
-                VALUES(?,?,1,?)
+                VALUES(%s,%s,1,%s)
                 ON CONFLICT(chat_id)
                 DO UPDATE SET
                     username=excluded.username,
@@ -5317,7 +5163,7 @@ def telegram_unregister_api():
                 """
                 UPDATE telegram_users
                 SET active=0
-                WHERE chat_id=?
+                WHERE chat_id=%s
                 """,
                 (str(chat_id),),
             )
@@ -5485,7 +5331,7 @@ def admin_reset_api():
                 connection.execute(
                     """
                     DELETE FROM structures
-                    WHERE pair=? AND timeframe=?
+                    WHERE pair=%s AND timeframe=%s
                     """,
                     (
                         canonical_symbol(raw_pair),
@@ -5497,7 +5343,7 @@ def admin_reset_api():
                 connection.execute(
                     """
                     DELETE FROM structures
-                    WHERE pair=?
+                    WHERE pair=%s
                     """,
                     (
                         canonical_symbol(raw_pair),
@@ -5530,17 +5376,21 @@ def admin_reset_api():
 )
 def admin_db_reset_api():
     if not strict_admin_authorized():
-        return jsonify(
-            {
-                "error": "unauthorized"
-            }
-        ), 401
+        return jsonify({"error": "unauthorized"}), 401
 
     with DB_LOCK:
-        delete_database_files()
-
         connection = db()
-        connection.close()
+        try:
+            cursor = connection.cursor()
+            cursor.execute("DROP TABLE IF EXISTS structures CASCADE")
+            cursor.execute("DROP TABLE IF EXISTS telegram_users CASCADE")
+            cursor.execute("DROP TABLE IF EXISTS scanner_targets CASCADE")
+            cursor.execute("DROP TABLE IF EXISTS telegram_trade_alerts CASCADE")
+            connection.commit()
+            cursor.close()
+            create_schema(connection)
+        finally:
+            connection.close()
 
     SCANNER_LAST.clear()
 
@@ -5548,7 +5398,7 @@ def admin_db_reset_api():
         {
             "ok": True,
             "message": "Database rebuilt",
-            "path": DB_PATH,
+            "type": "postgresql",
         }
     )
 
