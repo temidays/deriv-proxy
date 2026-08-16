@@ -5324,47 +5324,46 @@ def admin_reset_api():
             }
         ), 401
 
-    raw_pair = request.args.get(
-        "pair"
-    )
-
-    timeframe = request.args.get(
-        "timeframe"
-    )
+    raw_pair = request.args.get("pair")
+    timeframe = request.args.get("timeframe")
 
     with DB_LOCK:
         connection = db()
-
         try:
             cursor = connection.cursor()
-        if raw_pair and timeframe:
-            cursor.execute(
-                """
-                DELETE FROM structures
-                WHERE pair=%s AND timeframe=%s
-                """,
-                (
-                    canonical_symbol(raw_pair),
-                    timeframe.upper(),
-                ),
-            )
-        elif raw_pair:
-            cursor.execute(
-                """
-                DELETE FROM structures
-                WHERE pair=%s
-                """,
-                (
-                    canonical_symbol(raw_pair),
-                ),
-            )
-        else:
-            cursor.execute(
-                "DELETE FROM structures"
-            )
+
+            if raw_pair and timeframe:
+                cursor.execute(
+                    """
+                    DELETE FROM structures
+                    WHERE pair=%s AND timeframe=%s
+                    """,
+                    (
+                        canonical_symbol(raw_pair),
+                        timeframe.upper(),
+                    ),
+                )
+            elif raw_pair:
+                cursor.execute(
+                    """
+                    DELETE FROM structures
+                    WHERE pair=%s
+                    """,
+                    (
+                        canonical_symbol(raw_pair),
+                    ),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM structures"
+                )
+
             connection.commit()
             cursor.close()
 
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
