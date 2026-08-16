@@ -5077,6 +5077,7 @@ def scanner_stop_api():
     "/telegram/register",
     methods=["GET", "POST"],
 )
+
 def telegram_register_api():
     if request.method == "GET":
         chat_id = request.args.get(
