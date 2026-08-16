@@ -4313,18 +4313,27 @@ def health_api():
                 cursor = connection.cursor()
 
                 cursor.execute(
-                    "SELECT COUNT(*) FROM structures"
+                    "SELECT COUNT(*) AS cnt FROM structures"
                 )
-                structures_count = cursor.fetchone()[0]
+                structures_count = cursor.fetchone()["cnt"]
 
                 cursor.execute(
                     """
-                    SELECT COUNT(*)
+                    SELECT COUNT(*) AS cnt
                     FROM telegram_users
                     WHERE active=1
                     """
                 )
-                users_count = cursor.fetchone()[0]
+                users_count = cursor.fetchone()["cnt"]
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM telegram_trade_alerts
+                    WHERE trade_state='ACTIVE'
+                    """
+                )
+                plans_count = cursor.fetchone()["cnt"]
 
                 cursor.execute(
                     """
@@ -4333,7 +4342,7 @@ def health_api():
                     WHERE trade_state='ACTIVE'
                     """
                 )
-                plans_count = cursor.fetchone()[0]
+                plans_count = cursor.fetchone()["cnt"]
 
                 cursor.close()
             finally:
@@ -5425,7 +5434,7 @@ def admin_database_api():
             cursor = connection.cursor()
 
             cursor.execute("SELECT COUNT(*) FROM structures")
-            structures = cursor.fetchone()[0]
+            structures = cursor.fetchone()["cnt"]
 
             cursor.execute(
                 """
@@ -5434,7 +5443,7 @@ def admin_database_api():
                 WHERE state='COMPLETE'
                 """
             )
-            complete = cursor.fetchone()[0]
+            complete = cursor.fetchone()["cnt"]
 
             cursor.execute(
                 """
@@ -5443,7 +5452,7 @@ def admin_database_api():
                 WHERE active=1
                 """
             )
-            users = cursor.fetchone()[0]
+            users = cursor.fetchone()["cnt"]
 
             cursor.execute(
                 """
@@ -5451,7 +5460,7 @@ def admin_database_api():
                 FROM telegram_trade_alerts
                 """
             )
-            plans = cursor.fetchone()[0]
+            plans = cursor.fetchone()["cnt"]
 
             cursor.execute(
                 """
@@ -5460,7 +5469,7 @@ def admin_database_api():
                 WHERE trade_state='ACTIVE'
                 """
             )
-            active_plans = cursor.fetchone()[0]
+            active_plans = cursor.fetchone()["cnt"]
 
             cursor.close()
         finally:
