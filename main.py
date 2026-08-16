@@ -5127,9 +5127,11 @@ def telegram_register_api():
                 int(time.time()),
             ),
         )
-        connection.commit()
-        cursor.close()
-
+            connection.commit()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
