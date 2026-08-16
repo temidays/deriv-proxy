@@ -5078,21 +5078,19 @@ def scanner_stop_api():
     methods=["GET", "POST"],
 )
 
+@app.route(
+    "/telegram/register",
+    methods=["GET", "POST"],
+)
 def telegram_register_api():
     if request.method == "GET":
-        chat_id = request.args.get(
-            "chat_id"
-        )
-        username = request.args.get(
-            "username",
-            "",
-        )
+        chat_id = request.args.get("chat_id")
+        username = request.args.get("username", "")
     else:
         body = request.get_json(
             force=True,
             silent=True,
         ) or {}
-
         chat_id = body.get("chat_id")
         username = body.get("username", "")
 
@@ -5105,32 +5103,33 @@ def telegram_register_api():
 
     with DB_LOCK:
         connection = db()
-
         try:
             cursor = connection.cursor()
             cursor.execute(
-            """
-            INSERT INTO telegram_users(
-                chat_id,
-                username,
-                active,
-                created_epoch
+                """
+                INSERT INTO telegram_users(
+                    chat_id,
+                    username,
+                    active,
+                    created_epoch
+                )
+                VALUES(%s,%s,1,%s)
+                ON CONFLICT(chat_id)
+                DO UPDATE SET
+                    username=EXCLUDED.username,
+                    active=1
+                """,
+                (
+                    str(chat_id),
+                    username,
+                    int(time.time()),
+                ),
             )
-            VALUES(%s,%s,1,%s)
-            ON CONFLICT(chat_id)
-            DO UPDATE SET
-                username=EXCLUDED.username,
-                active=1
-            """,
-            (
-                str(chat_id),
-                username,
-                int(time.time()),
-            ),
-        )
-        connection.commit()
-        cursor.close()
-        
+            connection.commit()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
