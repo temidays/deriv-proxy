@@ -5278,8 +5278,8 @@ def telegram_plans_api():
         connection = db()
 
         try:
-        cursor = connection.cursor()
-        cursor.execute(
+            cursor = connection.cursor()
+            cursor.execute(
             """
             SELECT *
             FROM telegram_trade_alerts
@@ -5287,8 +5287,8 @@ def telegram_plans_api():
             LIMIT 300
             """
         )
-        rows = cursor.fetchall()
-        cursor.close()
+            rows = cursor.fetchall()
+            cursor.close()
 
         finally:
             connection.close()
