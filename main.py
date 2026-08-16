@@ -278,6 +278,21 @@ SCANNER_DIAGNOSTICS = {
     "scan_count": {},
 }
 
+# Require confluence on another timeframe before sending G alert.
+# Set to False to disable confluence requirement.
+REQUIRE_CONFLUENCE = os.environ.get(
+    "REQUIRE_CONFLUENCE", "true"
+).lower() in ("1", "true", "yes", "on")
+
+# Minimum stage rank on another timeframe to count as confluence.
+# 1 = has D (BOS confirmed)
+# 2 = has E (expansion confirmed)
+# 3 = has F (retracement confirmed)
+CONFLUENCE_MIN_RANK = max(
+    0,
+    int(os.environ.get("CONFLUENCE_MIN_RANK", "1")),
+)
+
 
 # ============================================================
 # DATABASE PATH (optimized for free Render)
@@ -2483,7 +2498,7 @@ def f_message_text(structure):
     return "\n".join(lines)
 
 
-def g_message_text(structure, candles):
+def g_message_text(structure, candles, confluent_tf=None, confluent_stage=None):
     plan = pending_trade_plan(
         structure,
         candles,
@@ -2495,14 +2510,24 @@ def g_message_text(structure, candles):
         else "🔴"
     )
 
+    confluence_line = (
+        f"✅ Confluence: <b>{confluent_tf}</b> also at "
+        f"<b>{confluent_stage}</b>"
+        if confluent_tf
+        else "✅ Confluence confirmed"
+    )
+
     return "\n".join(
         [
             f"{icon} <b>A→G SETUP CONFIRMED</b>",
             "",
             f"Symbol: <b>{plan['pair']}</b>",
             f"Timeframe: <b>{plan['timeframe']}</b>",
+            f"Direction: <b>{plan['direction']}</b>",
             f"G time: <b>{epoch_to_local(structure['g']['epoch'])}</b>",
             f"G price: <b>{plan['g_price']}</b>",
+            "",
+            confluence_line,
             "",
             f"Entry Zone: <b>{plan['entry_zone_low']} - {plan['entry_zone_high']}</b>",
             f"Stop Loss: <b>{plan['stop_loss']}</b>",
@@ -2518,6 +2543,7 @@ def g_message_text(structure, candles):
         ]
     )
 
+    
 
 def active_message_text(structure, candles):
     plan = active_trade_plan(
@@ -2889,9 +2915,13 @@ def send_f_notifications(structure):
     return sent
 
 
-def send_g_notifications(structure, candles):
+def send_g_notifications(
+    structure,
+    candles,
+    confluent_tf=None,
+    confluent_stage=None,
+):
     users = active_telegram_users()
-
     if not users:
         return 0
 
@@ -2899,6 +2929,8 @@ def send_g_notifications(structure, candles):
     text = g_message_text(
         structure,
         candles,
+        confluent_tf=confluent_tf,
+        confluent_stage=confluent_stage,
     )
 
     pending_plan = pending_trade_plan(
@@ -3408,6 +3440,66 @@ def monitor_trade_alerts(pair, timeframe, candles):
 # NOTIFICATION PROCESSING
 # ============================================================
 
+def check_timeframe_confluence(
+    pair,
+    timeframe,
+    direction,
+    min_stage_rank=1,
+):
+    """
+    Check if the same pair has a structure in the same direction
+    on at least one OTHER timeframe that is at least at stage D.
+
+    min_stage_rank:
+        0 = WAITING_FOR_BOS
+        1 = WAITING_FOR_E  (has D)
+        2 = WAITING_FOR_F  (has E)
+        3 = WAITING_FOR_G  (has F)
+        4 = WAITING_FOR_ENTRY (has G)
+        5 = ACTIVE
+    """
+    pair = canonical_symbol(pair)
+    timeframe = str(timeframe).upper()
+
+    with DB_LOCK:
+        connection = db()
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT timeframe, state, stage,
+                       d_json, e_json, f_json, g_json
+                FROM structures
+                WHERE pair=%s
+                  AND direction=%s
+                  AND timeframe != %s
+                  AND state NOT IN ('INVALID', 'CLOSED')
+                ORDER BY updated_epoch DESC
+                """,
+                (pair, direction, timeframe),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        finally:
+            connection.close()
+
+    for row in rows:
+        stage = row["stage"] or row["state"]
+        rank = {
+            "WAITING_FOR_BOS": 0,
+            "WAITING_FOR_E": 1,
+            "WAITING_FOR_F": 2,
+            "WAITING_FOR_G": 3,
+            "WAITING_FOR_ENTRY": 4,
+            "ACTIVE": 5,
+            "COMPLETE": 6,
+        }.get(stage, -1)
+
+        if rank >= min_stage_rank:
+            return True, row["timeframe"], stage
+
+    return False, None, None
+    
 def process_structure_events(
     structure,
     previous_stage,
@@ -3444,6 +3536,8 @@ def process_structure_events(
         )
 
     # G message contains Entry Zone + SL.
+    # Only send if confluence is confirmed on another timeframe
+    # (or if confluence check is disabled).
     if (
         structure.get("stage") in (
             "WAITING_FOR_ENTRY",
@@ -3452,10 +3546,42 @@ def process_structure_events(
         and g_epoch > live_from
         and g_epoch != previous_g_epoch
     ):
-        notifications += send_g_notifications(
-            structure,
-            candles,
-        )
+        confluent = True
+        confluent_tf = None
+        confluent_stage = None
+
+        if REQUIRE_CONFLUENCE:
+            confluent, confluent_tf, confluent_stage = (
+                check_timeframe_confluence(
+                    structure["pair"],
+                    structure["timeframe"],
+                    structure["direction"],
+                    min_stage_rank=CONFLUENCE_MIN_RANK,
+                )
+            )
+
+        if confluent:
+            if confluent_tf:
+                print(
+                    f"[Confluence] {structure['pair']} "
+                    f"{structure['timeframe']} "
+                    f"{structure['direction']} confirmed by "
+                    f"{confluent_tf} at {confluent_stage}"
+                )
+            notifications += send_g_notifications(
+                structure,
+                candles,
+                confluent_tf=confluent_tf,
+                confluent_stage=confluent_stage,
+            )
+        else:
+            print(
+                f"[Confluence] {structure['pair']} "
+                f"{structure['timeframe']} "
+                f"{structure['direction']} "
+                f"G formed but no confluence yet — "
+                f"holding Telegram alert"
+            )
 
     # If an entry was confirmed by a closed A-zone rejection,
     # send actual Entry + TP1/TP2/TP3.
