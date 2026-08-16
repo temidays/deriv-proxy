@@ -903,7 +903,7 @@ def delete_structure(structure):
                 (key,),
         )
             connection.commit()
-            cursor.close()
+        cursor.close()
 
         finally:
             connection.close()
