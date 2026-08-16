@@ -2726,7 +2726,6 @@ def active_telegram_users():
 def get_trade_alert(structure_key_value, chat_id):
     with DB_LOCK:
         connection = db()
-
         try:
             cursor = connection.cursor()
             cursor.execute(
@@ -2734,16 +2733,22 @@ def get_trade_alert(structure_key_value, chat_id):
                 SELECT *
                 FROM telegram_trade_alerts
                 WHERE structure_key=%s
-                  AND chat_id=%s
+                AND chat_id=%s
                 """,
                 (
                     structure_key_value,
                     str(chat_id),
                 ),
-            ).fetchone()
-
+            )
+            result_row = cursor.fetchone()
+            cursor.close()
+            return result_row
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
+
 
 
 def save_trade_alert(
@@ -2763,7 +2768,8 @@ def save_trade_alert(
         connection = db()
 
         try:
-            connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 INSERT INTO telegram_trade_alerts(
                     structure_key,
@@ -3125,7 +3131,8 @@ def monitor_trade_alerts(pair, timeframe, candles):
     with DB_LOCK:
         connection = db()
         try:
-            rows = connection.execute(
+            cursor = connection.cursor()
+            cursor.execute(
                 """
                 SELECT *
                 FROM telegram_trade_alerts
@@ -3139,6 +3146,8 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 ),
             )
             result_rows = cursor.fetchall()
+            rows = cursor.fetchall()
+            cursor.close()
             cursor.close()
             return result_rows
         finally:
@@ -4040,7 +4049,8 @@ def replace_scanner_targets(pairs, timeframes):
             )
 
             for target in targets:
-                connection.execute(
+                cursor = connection.cursor()
+                cursor.execute(
                     """
                     INSERT INTO scanner_targets(
                         pair,
