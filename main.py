@@ -4732,10 +4732,10 @@ def structures_api():
         connection = db()
 
         try:
-        cursor = connection.cursor()
-        cursor.execute(sql, arguments)
-        rows = cursor.fetchall()
-        cursor.close()
+            cursor = connection.cursor()
+            cursor.execute(sql, arguments)
+            rows = cursor.fetchall()
+            cursor.close()
 
         finally:
             connection.close()
