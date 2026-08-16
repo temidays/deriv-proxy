@@ -3901,6 +3901,20 @@ def database_scanner_targets():
             finally:
                 connection.close()
 
+        return [
+            {
+                "pair": row["pair"],
+                "timeframe": row["timeframe"],
+            }
+            for row in rows
+        ]
+
+    except Exception as exc:
+        print(
+            f"[Scanner] Target lookup failed: {exc}"
+        )
+        return []
+
 def effective_scanner_targets(config=None):
     stored = database_scanner_targets()
     if stored:
