@@ -5164,8 +5164,8 @@ def telegram_unregister_api():
         connection = db()
 
         try:
-        cursor = connection.cursor()
-        cursor.execute(
+            cursor = connection.cursor()
+            cursor.execute(
             """
             UPDATE telegram_users
             SET active=0
