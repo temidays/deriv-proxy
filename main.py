@@ -44,7 +44,7 @@ app = Flask(__name__)
 
 DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 DERIV_WS_URL = (
-    "wss://green.derivws.com/websockets/v3"
+    "wss://ws.derivws.com/websockets/v3"
     f"?app_id={DERIV_APP_ID}"
 )
 
