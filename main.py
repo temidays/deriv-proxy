@@ -875,8 +875,8 @@ def structures_for(pair, timeframe):
                 canonical_tf,
                 ),
         )
-        rows = cursor.fetchall()
-        cursor.close()
+            rows = cursor.fetchall()
+            cursor.close()
 
         finally:
             connection.close()
