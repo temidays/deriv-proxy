@@ -5337,7 +5337,7 @@ def admin_reset_api():
 
         try:
             cursor = connection.cursor()
-            if raw_pair and timeframe:
+        if raw_pair and timeframe:
             cursor.execute(
                 """
                 DELETE FROM structures
