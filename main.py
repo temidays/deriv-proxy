@@ -4335,15 +4335,6 @@ def health_api():
                 )
                 plans_count = cursor.fetchone()["cnt"]
 
-                cursor.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM telegram_trade_alerts
-                    WHERE trade_state='ACTIVE'
-                    """
-                )
-                plans_count = cursor.fetchone()["cnt"]
-
                 cursor.close()
             finally:
                 connection.close()
