@@ -294,8 +294,8 @@ SYMBOL_MAP = {
     "OTC_AS51": "OTC_AS51",
 
     # Cryptocurrencies
-    "cryBTCUSD": "cryBTCUSD",
-    "cryETHUSD": "cryETHUSD",
+    "BTCUSD": "cryBTCUSD",
+    "ETHUSD": "cryETHUSD",
 
     "CRYBTCUSD": "cryBTCUSD",
     "CRYETHUSD": "cryETHUSD",
