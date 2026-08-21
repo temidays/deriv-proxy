@@ -167,20 +167,33 @@ SYMBOL_MAP = {
     "VOLATILITY3001S": "1HZ300V",
 
     # Boom and Crash
+    "BOOM50": "BOOM50",
+    "BOOM150N": "BOOM150N",
+    "BOOM300N": "BOOM300N",
     "BOOM500": "BOOM500",
+    "BOOM600": "BOOM600",
+    "BOOM900": "BOOM900",
     "BOOM1000": "BOOM1000",
+    "CRASH50": "CRASH50",
+    "CRASH150N": "CRASH150N",
+    "CRASH300N": "CRASH300N",
     "CRASH500": "CRASH500",
+    "CRASH600": "CRASH600",
+    "CRASH900": "CRASH900",
     "CRASH1000": "CRASH1000",
 
 
     # Step and Jump Indices
-    "STEP": "STEP",
-    "STEPINDEX": "STEP",
-    "JUMP10": "JUMP10",
-    "JUMP25": "JUMP25",
-    "JUMP50": "JUMP50",
-    "JUMP75": "JUMP75",
-    "JUMP100": "JUMP100",
+    "STPRNG": "STPRNG",
+    "STPRNG2": "STPRNG2",
+    "STPRNG3": "STPRNG3",
+    "STPRNG4": "STPRNG4",
+    "STPRNG5": "STPRNG5",
+    "JD10": "JD10",
+    "JD25": "JD25",
+    "JD50": "JD50",
+    "JD75": "JD75",
+    "JD100": "JD100"
     
     # Forex
     "EURUSD": "frxEURUSD",
@@ -243,24 +256,22 @@ SYMBOL_MAP = {
     "NGAS": "frxNGAS",
 
     # Stock Indices
-    "US100": "OTC_NDX",
-    "NAS100": "OTC_NDX",
-    "US30": "OTC_DOW",
-    "US500": "OTC_SPC",
-    "SPX500": "OTC_SPC",
-    "UK100": "OTC_FTS",
-    "GER40": "OTC_DAX",
-    "DAX40": "OTC_DAX",
-    "JPN225": "OTC_N225",
-    "AUS200": "OTC_AS51",
+    "OTC_NDX": "OTC_NDX",
+    "OTC_HSI": "OTC_HSI",
+    "OTC_SX5E": "OTC_SX5E",
+    "OTC_FCHI": "OTC_FCHI",
+    "OTC_AEX": "OTC_AEX",
+    "OTC_SSMI": "OTC_SSMI",
+    "OTC_DJI": "OTC_DJI",
+    "OTC_SPC": "OTC_SPC",
+    "OTC_FTSE": "OTC_FTSE",
+    "OTC_GDAXI": "OTC_GDAXI",
+    "OTC_N225": "OTC_N225",
+    "OTC_AS51": "OTC_AS51",
 
     # Cryptocurrencies
-    "BTCUSD": "cryBTCUSD",
-    "ETHUSD": "cryETHUSD",
-    "LTCUSD": "cryLTCUSD",
-    "XRPUSD": "cryXRPUSD",
-    "ADAUSD": "cryADAUSD",
-    "SOLUSD": "crySOLUSD",
+    "cryBTCUSD": "cryBTCUSD",
+    "cryETHUSD": "cryETHUSD",
 }
 
 
