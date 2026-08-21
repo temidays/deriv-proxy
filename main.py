@@ -5095,21 +5095,6 @@ def close_structure_api():
             }
         ), 400
 
-    # Wait up to 15 seconds for the scanner to finish
-    # its current cycle before processing the discard.
-    acquired = SCAN_LOCK.acquire(blocking=True, timeout=15)
-
-    if not acquired:
-        return jsonify(
-            {
-                "ok": False,
-                "error": (
-                    "Scanner is busy. "
-                    "Please try again."
-                ),
-            }
-        ), 409
-
     try:
         structure = structure_for_key(
             structure_key_value
@@ -5129,21 +5114,45 @@ def close_structure_api():
             body.get("reason", "")
         ).strip() or default_reason
 
-        send_cancel_notifications(
-            structure,
-            reason,
-        )
+        # Send Telegram cancellation notification
+        try:
+            send_cancel_notifications(
+                structure,
+                reason,
+            )
+        except Exception as exc:
+            print(
+                f"[Close] Telegram notification failed: {exc}"
+            )
 
-        close_trade_alerts_for_structure(
-            structure_key_value,
-            trade_state,
-            reason,
-        )
+        # Stop Telegram TP/SL monitoring
+        try:
+            close_trade_alerts_for_structure(
+                structure_key_value,
+                trade_state,
+                reason,
+            )
+        except Exception as exc:
+            print(
+                f"[Close] Trade alert update failed: {exc}"
+            )
 
+        # Mark structure as CLOSED in database
         close_structure_by_key(
             structure_key_value,
             reason,
         )
+
+        # Clear scanner cache so next cycle
+        # picks up the change immediately
+        key_to_clear = None
+        for k in list(SCANNER_LAST.keys()):
+            if structure["pair"] in k and structure["timeframe"] in k:
+                key_to_clear = k
+                break
+
+        if key_to_clear:
+            SCANNER_LAST.pop(key_to_clear, None)
 
         return jsonify(
             {
@@ -5158,8 +5167,14 @@ def close_structure_api():
             }
         )
 
-    finally:
-        SCAN_LOCK.release()
+    except Exception as exc:
+        print(f"[Close] Error: {exc}")
+        return jsonify(
+            {
+                "ok": False,
+                "error": str(exc),
+            }
+        ), 500
 
 
 @app.route(
