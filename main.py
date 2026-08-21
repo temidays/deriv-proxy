@@ -5095,13 +5095,17 @@ def close_structure_api():
             }
         ), 400
 
-    if not SCAN_LOCK.acquire(blocking=False):
+    # Wait up to 15 seconds for the scanner to finish
+    # its current cycle before processing the discard.
+    acquired = SCAN_LOCK.acquire(blocking=True, timeout=15)
+
+    if not acquired:
         return jsonify(
             {
                 "ok": False,
                 "error": (
                     "Scanner is busy. "
-                    "Try again in a few seconds."
+                    "Please try again."
                 ),
             }
         ), 409
