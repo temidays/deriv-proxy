@@ -296,6 +296,9 @@ SYMBOL_MAP = {
     # Cryptocurrencies
     "cryBTCUSD": "cryBTCUSD",
     "cryETHUSD": "cryETHUSD",
+
+    "CRYBTCUSD": "cryBTCUSD",
+    "CRYETHUSD": "cryETHUSD",
 }
 
 
