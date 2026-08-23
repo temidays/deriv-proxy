@@ -4402,29 +4402,44 @@ def database_scanner_targets():
         return []
 
 def effective_scanner_targets(config=None):
-    stored = database_scanner_targets()
+    """
+    Always use Render ENV configuration.
 
-    if stored:
-        # Filter out OTC indices regardless of what is stored
-        return [
-            t for t in stored
-            if not t["pair"].startswith("OTC_")
-        ]
+    Database scanner_targets are ignored.
+
+    This guarantees that every pair and every timeframe
+    defined in:
+
+        SCANNER_PAIRS
+        SCANNER_TIMEFRAMES
+
+    will be scanned every cycle.
+    """
 
     config = config or scanner_settings()
 
-    if not config["pairs"] or not config["timeframes"]:
+    pairs = config.get("pairs", [])
+    timeframes = config.get("timeframes", [])
+
+    if not pairs:
         return []
 
-    return [
-        {
-            "pair": pair,
-            "timeframe": timeframe,
-        }
-        for pair in config["pairs"]
-        for timeframe in config["timeframes"]
-        if not pair.startswith("OTC_")
-    ]
+    if not timeframes:
+        return []
+
+    targets = []
+
+    for pair in pairs:
+        for timeframe in timeframes:
+
+            targets.append(
+                {
+                    "pair": pair,
+                    "timeframe": timeframe,
+                }
+            )
+
+    return targets
 
 
 def replace_scanner_targets(pairs, timeframes):
