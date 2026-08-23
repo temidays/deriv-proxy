@@ -3884,6 +3884,9 @@ def run_scan(
             fib_ratio=fib_ratio,
         )
 
+        if structure is None:
+            continue
+
         # After G, wait for a CLOSED A-zone rejection candle.
         if structure.get("stage") == "WAITING_FOR_ENTRY":
             confirm_closed_entry(
@@ -4036,13 +4039,16 @@ def run_scan(
                 fib_ratio=fib_ratio,
             )
 
+            if candidate is None:
+                continue
+
             if candidate.get("stage") == "WAITING_FOR_ENTRY":
                 confirm_closed_entry(
                     candidate,
                     candles,
                 )
 
-            if candidate["state"] == "INVALID":
+            if candidate.get("state") == "INVALID":
                 continue
 
             save(candidate)
@@ -4078,13 +4084,16 @@ def run_scan(
                 fib_ratio=fib_ratio,
             )
 
+            if candidate is None:
+                continue
+
             if candidate.get("stage") == "WAITING_FOR_ENTRY":
                 confirm_closed_entry(
                     candidate,
                     candles,
                 )
 
-            if candidate["state"] == "INVALID":
+            if candidate.get("state") == "INVALID":
                 continue
 
             save(candidate)
