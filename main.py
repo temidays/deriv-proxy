@@ -2942,6 +2942,7 @@ def active_telegram_users():
 
         try:
             cursor = connection.cursor()
+
             cursor.execute(
                 """
                 SELECT chat_id
@@ -2949,10 +2950,13 @@ def active_telegram_users():
                 WHERE active=1
                 """
             )
+
             result_rows = cursor.fetchall()
+
             cursor.close()
+
             return result_rows
-            
+
         finally:
             release_connection(connection)
 
