@@ -4,7 +4,6 @@ import json
 import os
 import psycopg2
 import psycopg2.extras
-import psycopg2.pool
 import tempfile
 import threading
 import time
@@ -168,88 +167,31 @@ SYMBOL_MAP = {
     "VOLATILITY3001S": "1HZ300V",
 
     # Boom and Crash
-    "BOOM50": "BOOM50",
-    "BOOM150N": "BOOM150N",
-    "BOOM300N": "BOOM300N",
     "BOOM500": "BOOM500",
-    "BOOM600": "BOOM600",
-    "BOOM900": "BOOM900",
     "BOOM1000": "BOOM1000",
-    "CRASH50": "CRASH50",
-    "CRASH150N": "CRASH150N",
-    "CRASH300N": "CRASH300N",
     "CRASH500": "CRASH500",
-    "CRASH600": "CRASH600",
-    "CRASH900": "CRASH900",
     "CRASH1000": "CRASH1000",
-
-    # Step Index
-    "STPRNG": "STPRNG",
-    "STPRNG2": "STPRNG2",
-    "STPRNG3": "STPRNG3",
-    "STPRNG4": "STPRNG4",
-    "STPRNG5": "STPRNG5",
-
-    # Jump Diffusion
-    "JD10": "JD10",
-    "JD25": "JD25",
-    "JD50": "JD50",
-    "JD75": "JD75",
-    "JD100": "JD100",
-
-    # Boom extended
-    "BOOM50": "BOOM50",
-    "BOOM150N": "BOOM150N",
-    "BOOM300N": "BOOM300N",
-    "BOOM600": "BOOM600",
-    "BOOM900": "BOOM900",
-
-    # Crash extended
-    "CRASH50": "CRASH50",
-    "CRASH150N": "CRASH150N",
-    "CRASH300N": "CRASH300N",
-    "CRASH600": "CRASH600",
-    "CRASH900": "CRASH900",
-
-    # 1Hz Volatility
-    "1HZ10V": "1HZ10V",
-    "1HZ25V": "1HZ25V",
-    "1HZ50V": "1HZ50V",
-    "1HZ75V": "1HZ75V",
-    "1HZ100V": "1HZ100V",
 
 
     # Step and Jump Indices
-    "STPRNG": "STPRNG",
-    "STPRNG2": "STPRNG2",
-    "STPRNG3": "STPRNG3",
-    "STPRNG4": "STPRNG4",
-    "STPRNG5": "STPRNG5",
-    "JD10": "JD10",
-    "JD25": "JD25",
-    "JD50": "JD50",
-    "JD75": "JD75",
-    "JD100": "JD100",
+    "STEP": "STEP",
+    "STEPINDEX": "STEP",
+    "JUMP10": "JUMP10",
+    "JUMP25": "JUMP25",
+    "JUMP50": "JUMP50",
+    "JUMP75": "JUMP75",
+    "JUMP100": "JUMP100",
     
     # Forex
-    "NZDJPY": "frxNZDJPY",
-    "NZDUSD": "frxNZDUSD",
-    "GBPCHF": "frxGBPCHF",
-    "GBPCAD": "frxGBPCAD",
-    "EURNZD": "frxEURNZD",
-    "AUDNZD": "frxAUDNZD",
-    "AUDCHF": "frxAUDCHF",
-    "AUDCAD": "frxAUDCAD",
-    "GBPJPY": "frxGBPJPY",
-    "GBPAUD": "frxGBPAUD",
-    "EURAUD": "frxEURAUD",
     "EURUSD": "frxEURUSD",
     "GBPUSD": "frxGBPUSD",
     "USDJPY": "frxUSDJPY",
     "AUDUSD": "frxAUDUSD",
     "USDCAD": "frxUSDCAD",
     "USDCHF": "frxUSDCHF",
+    "NZDUSD": "frxNZDUSD",
     "EURGBP": "frxEURGBP",
+    "GBPJPY": "frxGBPJPY",
     "EURCHF": "frxEURCHF",
     "AUDJPY": "frxAUDJPY",
     "EURCAD": "frxEURCAD",
@@ -260,33 +202,18 @@ SYMBOL_MAP = {
     "USDMXN": "frxUSDMXN",
     "USDSGD": "frxUSDSGD",
 
-    "FRXNZDJPY": "frxNZDJPY",
-    "FRXNZDUSD": "frxNZDUSD",
-    "FRXGBPCHF": "frxGBPCHF",
-    "FRXGBPCAD": "frxGBPCAD",
-    "FRXEURNZD": "frxEURNZD",
-    "FRXAUDNZD": "frxAUDNZD",
-    "FRXAUDCHF": "frxAUDCHF",
-    "FRXAUDCAD": "frxAUDCAD",
-    "FRXGBPJPY": "frxGBPJPY",
-    "FRXGBPAUD": "frxGBPAUD",
-    "FRXEURAUD": "frxEURAUD",
     "FRXEURUSD": "frxEURUSD",
     "FRXGBPUSD": "frxGBPUSD",
     "FRXUSDJPY": "frxUSDJPY",
     "FRXAUDUSD": "frxAUDUSD",
     "FRXUSDCAD": "frxUSDCAD",
     "FRXUSDCHF": "frxUSDCHF",
+    "FRXNZDUSD": "frxNZDUSD",
     "FRXEURGBP": "frxEURGBP",
-    "FRXEURCHF": "frxEURCHF",
-    "FRXAUDJPY": "frxAUDJPY",
-    "FRXEURCAD": "frxEURCAD",
-    "FRXCHFJPY": "frxCHFJPY",
+    "FRXGBPJPY": "frxGBPJPY",
     "FRXEURJPY": "frxEURJPY",
-    "FRXUSDZAR": "frxUSDZAR",
-    "FRXUSDTRY": "frxUSDTRY",
-    "FRXUSDMXN": "frxUSDMXN",
-    "FRXUSDSGD": "frxUSDSGD",
+    "FRXAUDJPY": "frxAUDJPY",
+    "FRXCADJPY": "frxCADJPY",
 
     # Metals
     "XAUUSD": "frxXAUUSD",
@@ -316,99 +243,25 @@ SYMBOL_MAP = {
     "NGAS": "frxNGAS",
 
     # Stock Indices
-    "OTC_NDX": "OTC_NDX",
-    "OTC_HSI": "OTC_HSI",
-    "OTC_SX5E": "OTC_SX5E",
-    "OTC_FCHI": "OTC_FCHI",
-    "OTC_AEX": "OTC_AEX",
-    "OTC_SSMI": "OTC_SSMI",
-    "OTC_DJI": "OTC_DJI",
-    "OTC_SPC": "OTC_SPC",
-    "OTC_FTSE": "OTC_FTSE",
-    "OTC_GDAXI": "OTC_GDAXI",
-    "OTC_N225": "OTC_N225",
-    "OTC_AS51": "OTC_AS51",
+    "US100": "OTC_NDX",
+    "NAS100": "OTC_NDX",
+    "US30": "OTC_DOW",
+    "US500": "OTC_SPC",
+    "SPX500": "OTC_SPC",
+    "UK100": "OTC_FTS",
+    "GER40": "OTC_DAX",
+    "DAX40": "OTC_DAX",
+    "JPN225": "OTC_N225",
+    "AUS200": "OTC_AS51",
 
     # Cryptocurrencies
     "BTCUSD": "cryBTCUSD",
     "ETHUSD": "cryETHUSD",
-
-    "CRYBTCUSD": "cryBTCUSD",
-    "CRYETHUSD": "cryETHUSD",
+    "LTCUSD": "cryLTCUSD",
+    "XRPUSD": "cryXRPUSD",
+    "ADAUSD": "cryADAUSD",
+    "SOLUSD": "crySOLUSD",
 }
-
-# ============================================================
-# MARKET HOURS
-# ============================================================
-
-# Pairs that trade 24/7 — always scan
-ALWAYS_ON_PREFIXES = (
-    "R_",
-    "1HZ",
-    "BOOM",
-    "CRASH",
-    "STEP",
-    "STPRNG",
-    "JD",
-    "cry",
-)
-
-# Forex and metals — closed on weekends
-FOREX_PREFIXES = (
-    "frx",
-)
-
-# Stock indices — complex hours, skip for now
-INDICES_PREFIXES = (
-    "OTC_",
-)
-
-
-def is_market_open(pair):
-    """
-    Return True if this pair is currently tradeable.
-
-    Synthetics and crypto: always open.
-    Forex and metals: closed Saturday and Sunday.
-    Stock indices: skipped entirely for now.
-    """
-    pair = str(pair).strip()
-
-    # Stock indices — skip entirely
-    if any(pair.startswith(p) for p in INDICES_PREFIXES):
-        return False
-
-    # Synthetics and crypto — always open
-    if any(pair.startswith(p) for p in ALWAYS_ON_PREFIXES):
-        return True
-
-    # Forex and metals — check if it is a weekday
-    if any(pair.startswith(p) for p in FOREX_PREFIXES):
-        now_utc = datetime.now(timezone.utc)
-        weekday = now_utc.weekday()
-
-        # Monday=0, Tuesday=1, ..., Friday=4,
-        # Saturday=5, Sunday=6
-
-        # Forex closes Friday 22:00 UTC
-        # Forex opens Sunday 22:00 UTC
-        if weekday == 5:
-            # Saturday — always closed
-            return False
-
-        if weekday == 6:
-            # Sunday — closed until 22:00 UTC
-            return now_utc.hour >= 22
-
-        if weekday == 4:
-            # Friday — closed after 22:00 UTC
-            return now_utc.hour < 22
-
-        # Monday to Thursday — always open
-        return True
-
-    # Unknown pair type — allow scanning
-    return True
 
 
 DB_LOCK = threading.RLock()
@@ -447,26 +300,6 @@ CONFLUENCE_MIN_RANK = max(
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 DB_IS_PERSISTENT = bool(DATABASE_URL)
-
-# Connection pool for PostgreSQL
-_DB_POOL = None
-
-def get_pool():
-    global _DB_POOL
-    if _DB_POOL is None and DATABASE_URL:
-        try:
-            _DB_POOL = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=8,
-                dsn=DATABASE_URL,
-                connect_timeout=30,
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            )
-            print("[DB] Connection pool created (max 8 connections)")
-        except Exception as exc:
-            print(f"[DB] Pool creation failed: {exc}")
-            _DB_POOL = None
-    return _DB_POOL
 
 if DB_IS_PERSISTENT:
     print(f"[DB] Using PostgreSQL database")
@@ -509,21 +342,9 @@ def canonical_symbol(value):
         if candidate in SYMBOL_MAP.values():
             return candidate
 
-    # Pass through unknown symbols that look like
-    # valid Deriv synthetic indices
-    SYNTHETIC_PREFIXES = (
-        "BOOM", "CRASH", "STPRNG", "JD",
-        "1HZ", "R_", "STEP",
-    )
-    if any(raw.upper().startswith(p) for p in SYNTHETIC_PREFIXES):
-        return raw.strip()
-
-    # Pass through valid Deriv synthetic symbols
-    clean = raw.strip()
-    if clean and all(c.isalnum() or c == '_' for c in clean):
-        return clean
-
     return ""
+
+
 def unique_values(values):
     result = []
     seen = set()
@@ -695,7 +516,9 @@ def open_database():
         connect_timeout=30,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
+
     connection.autocommit = False
+    create_schema(connection)
     return connection
 
 
@@ -712,23 +535,6 @@ def db():
             except Exception:
                 pass
         raise
-
-
-def release_connection(connection):
-    """Return connection to pool or close it."""
-    if connection is None:
-        return
-    try:
-        pool = get_pool()
-        if pool:
-            pool.putconn(connection)
-        else:
-            connection.close()
-    except Exception:
-        try:
-            connection.close()
-        except Exception:
-            pass
 
 
 # ============================================================
@@ -1006,10 +812,7 @@ def save(structure):
             raise
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 def parse_json_point(row, column):
@@ -1023,12 +826,9 @@ def parse_json_point(row, column):
 
 def row_to_structure(row):
     try:
-        stage = row.get("stage") or row.get("state") or ""
+        stage = row["stage"] or row["state"]
     except Exception:
-        try:
-            stage = row["state"]
-        except Exception:
-            return None
+        stage = row["state"]
 
     structure = {
         "id": row["id"],
@@ -1098,22 +898,15 @@ def structures_for(pair, timeframe):
             rows = cursor.fetchall()
             cursor.close()
 
-        except Exception as save_exc:
-            print(f"[DB] Save failed for {values.get('pair')} {values.get('timeframe')}: {save_exc}")
+        except Exception:
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     return [
-        s for s in (
-            row_to_structure(row)
-            for row in rows
-        )
-        if s is not None
+        row_to_structure(row)
+        for row in rows
     ]
 
 
@@ -1137,10 +930,7 @@ def delete_structure(structure):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 def delete_structure_by_key(structure_key_value):
@@ -1158,10 +948,7 @@ def delete_structure_by_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 def structure_for_key(structure_key_value):
     with DB_LOCK:
@@ -1182,10 +969,7 @@ def structure_for_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     if not row:
         return None
@@ -1225,10 +1009,7 @@ def close_structure_by_key(structure_key_value, reason):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 def close_trade_alerts_for_structure(
@@ -1267,10 +1048,7 @@ def close_trade_alerts_for_structure(
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 # ============================================================
@@ -2971,10 +2749,7 @@ def active_telegram_users():
             return result_rows
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 def get_trade_alert(structure_key_value, chat_id):
@@ -3001,10 +2776,7 @@ def get_trade_alert(structure_key_value, chat_id):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 
@@ -3097,10 +2869,7 @@ def save_trade_alert(
             connection.commit()
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
 
 def send_f_notifications(structure):
@@ -3417,10 +3186,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
             cursor.close()
             return result_rows
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     if not rows:
         return 0
@@ -3715,10 +3481,7 @@ def check_timeframe_confluence(
             rows = cursor.fetchall()
             cursor.close()
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     for row in rows:
         stage = row["stage"] or row["state"]
@@ -3957,9 +3720,6 @@ def run_scan(
             fib_ratio=fib_ratio,
         )
 
-        if structure is None:
-            continue
-
         # After G, wait for a CLOSED A-zone rejection candle.
         if structure.get("stage") == "WAITING_FOR_ENTRY":
             confirm_closed_entry(
@@ -4112,16 +3872,13 @@ def run_scan(
                 fib_ratio=fib_ratio,
             )
 
-            if candidate is None:
-                continue
-
             if candidate.get("stage") == "WAITING_FOR_ENTRY":
                 confirm_closed_entry(
                     candidate,
                     candles,
                 )
 
-            if candidate.get("state") == "INVALID":
+            if candidate["state"] == "INVALID":
                 continue
 
             save(candidate)
@@ -4157,16 +3914,13 @@ def run_scan(
                 fib_ratio=fib_ratio,
             )
 
-            if candidate is None:
-                continue
-
             if candidate.get("stage") == "WAITING_FOR_ENTRY":
                 confirm_closed_entry(
                     candidate,
                     candles,
                 )
 
-            if candidate.get("state") == "INVALID":
+            if candidate["state"] == "INVALID":
                 continue
 
             save(candidate)
@@ -4402,44 +4156,23 @@ def database_scanner_targets():
         return []
 
 def effective_scanner_targets(config=None):
-    """
-    Always use Render ENV configuration.
-
-    Database scanner_targets are ignored.
-
-    This guarantees that every pair and every timeframe
-    defined in:
-
-        SCANNER_PAIRS
-        SCANNER_TIMEFRAMES
-
-    will be scanned every cycle.
-    """
+    stored = database_scanner_targets()
+    if stored:
+        return stored
 
     config = config or scanner_settings()
 
-    pairs = config.get("pairs", [])
-    timeframes = config.get("timeframes", [])
-
-    if not pairs:
+    if not config["pairs"] or not config["timeframes"]:
         return []
 
-    if not timeframes:
-        return []
-
-    targets = []
-
-    for pair in pairs:
-        for timeframe in timeframes:
-
-            targets.append(
-                {
-                    "pair": pair,
-                    "timeframe": timeframe,
-                }
-            )
-
-    return targets
+    return [
+        {
+            "pair": pair,
+            "timeframe": timeframe,
+        }
+        for pair in config["pairs"]
+        for timeframe in config["timeframes"]
+    ]
 
 
 def replace_scanner_targets(pairs, timeframes):
@@ -4478,9 +4211,9 @@ def replace_scanner_targets(pairs, timeframes):
         for timeframe in canonical_timeframes
     ]
 
-    if len(targets) > 2000:
+    if len(targets) > 50:
         raise ValueError(
-            "Maximum 2000 pair/timeframe combinations"
+            "Maximum 50 pair/timeframe combinations"
         )
 
     now = int(time.time())
@@ -4522,10 +4255,7 @@ def replace_scanner_targets(pairs, timeframes):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     return targets
 
@@ -4586,9 +4316,7 @@ def continuous_scan_once(pair, timeframe, config):
     latest_epoch = candles[-1]["epoch"]
     key = f"{pair}|{timeframe}"
 
-    # Skip only when candles unchanged AND we have structures saved
-    # This ensures empty pairs always get a full scan
-    if False and SCANNER_LAST.get(key) == latest_epoch:  # Skip disabled - always scan
+    if SCANNER_LAST.get(key) == latest_epoch:
         events = monitor_trade_alerts(
             pair,
             timeframe,
@@ -4614,41 +4342,18 @@ def continuous_scan_once(pair, timeframe, config):
 
         return result
 
-    try:
-        result = run_scan(
-            pair=pair,
-            timeframe=timeframe,
-            candles=candles,
-            strength=config["strength"],
-            bos_mode=config["bos"],
-            min_atr=config["min_atr"],
-            expansion_atr=config["expansion_atr"],
-            displacement_atr=config["displacement_atr"],
-            min_bars=config["min_bars"],
-            fib_ratio=config["fib_ratio"],
-        )
-    except Exception as exc:
-        diagnostic_error(pair, timeframe, exc)
-        print(f"[Scanner] {pair} {timeframe} run_scan ERROR: {exc}")
-        return {
-            "ok": False,
-            "pair": pair,
-            "timeframe": timeframe,
-            "skipped": False,
-            "completed_now": 0,
-            "trade_events_now": 0,
-            "error": str(exc),
-        }
-
-    if not result:
-        return {
-            "ok": False,
-            "pair": pair,
-            "timeframe": timeframe,
-            "skipped": False,
-            "completed_now": 0,
-            "trade_events_now": 0,
-        }
+    result = run_scan(
+        pair=pair,
+        timeframe=timeframe,
+        candles=candles,
+        strength=config["strength"],
+        bos_mode=config["bos"],
+        min_atr=config["min_atr"],
+        expansion_atr=config["expansion_atr"],
+        displacement_atr=config["displacement_atr"],
+        min_bars=config["min_bars"],
+        fib_ratio=config["fib_ratio"],
+    )
 
     SCANNER_LAST[key] = latest_epoch
 
@@ -4676,8 +4381,6 @@ def scanner_loop():
         "[Scanner] Started "
         f"(interval={config['interval']} seconds)"
     )
-
-    consecutive_errors = 0
 
     while not SCANNER_STOP.is_set():
         cycle_started = time.time()
@@ -4715,15 +4418,6 @@ def scanner_loop():
                                     config,
                                 )
 
-                                if not result:
-                                    result = {
-                                        "ok": False,
-                                        "skipped": True,
-                                        "completed_now": 0,
-                                        "trade_events_now": 0,
-                                        "reason": "no_result",
-                                    }
-
                                 if result.get("completed_now", 0):
                                     print(
                                         f"[Scanner] {pair} "
@@ -4739,17 +4433,14 @@ def scanner_loop():
                                         "trade event(s)"
                                     )
                                 else:
-                                    reason = result.get("reason", "")
-                                    if reason != "market_closed":
-                                        print(
-                                            f"[Scanner] {pair} "
-                                            f"{timeframe}: OK "
-                                            f"(skipped="
-                                            f"{result.get('skipped')})"
-                                        )
+                                    print(
+                                        f"[Scanner] {pair} "
+                                        f"{timeframe}: OK "
+                                        f"(skipped="
+                                        f"{result.get('skipped')})"
+                                    )
 
                             except Exception as exc:
-                                import traceback
                                 diagnostic_error(
                                     pair,
                                     timeframe,
@@ -4760,23 +4451,12 @@ def scanner_loop():
                                     f"{timeframe} ERROR: "
                                     f"{exc}"
                                 )
-                                print(
-                                    f"[Scanner] TRACEBACK: "
-                                    f"{traceback.format_exc()}"
-                                )
 
                 finally:
                     SCAN_LOCK.release()
 
         except Exception as exc:
-            consecutive_errors += 1
-            print(f"[Scanner] OUTER ERROR ({consecutive_errors}): {exc}")
-            if consecutive_errors > 10:
-                print("[Scanner] Too many errors - restarting scanner thread")
-                consecutive_errors = 0
-
-        else:
-            consecutive_errors = 0
+            print(f"[Scanner] OUTER ERROR: {exc}")
 
         elapsed = time.time() - cycle_started
         config = scanner_settings()
@@ -4791,7 +4471,6 @@ def scanner_loop():
         SCANNER_STOP.wait(wait_seconds)
 
     print("[Scanner] Stopped")
-
 
 
 def start_scanner():
@@ -4934,10 +4613,6 @@ def health_api():
                 SCANNER_THREAD
                 and SCANNER_THREAD.is_alive()
                 and not SCANNER_STOP.is_set()
-            ),
-            "scanner_thread_alive": bool(
-            SCANNER_THREAD
-            and SCANNER_THREAD.is_alive()
             ),
             "scanner_interval_seconds": config["interval"],
             "g_min_reach": G_MIN_REACH,
@@ -5315,10 +4990,7 @@ def structures_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     return jsonify(
         [
@@ -5385,6 +5057,17 @@ def close_structure_api():
             }
         ), 400
 
+    if not SCAN_LOCK.acquire(blocking=False):
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Scanner is busy. "
+                    "Try again in a few seconds."
+                ),
+            }
+        ), 409
+
     try:
         structure = structure_for_key(
             structure_key_value
@@ -5404,45 +5087,21 @@ def close_structure_api():
             body.get("reason", "")
         ).strip() or default_reason
 
-        # Send Telegram cancellation notification
-        try:
-            send_cancel_notifications(
-                structure,
-                reason,
-            )
-        except Exception as exc:
-            print(
-                f"[Close] Telegram notification failed: {exc}"
-            )
+        send_cancel_notifications(
+            structure,
+            reason,
+        )
 
-        # Stop Telegram TP/SL monitoring
-        try:
-            close_trade_alerts_for_structure(
-                structure_key_value,
-                trade_state,
-                reason,
-            )
-        except Exception as exc:
-            print(
-                f"[Close] Trade alert update failed: {exc}"
-            )
+        close_trade_alerts_for_structure(
+            structure_key_value,
+            trade_state,
+            reason,
+        )
 
-        # Mark structure as CLOSED in database
         close_structure_by_key(
             structure_key_value,
             reason,
         )
-
-        # Clear scanner cache so next cycle
-        # picks up the change immediately
-        key_to_clear = None
-        for k in list(SCANNER_LAST.keys()):
-            if structure["pair"] in k and structure["timeframe"] in k:
-                key_to_clear = k
-                break
-
-        if key_to_clear:
-            SCANNER_LAST.pop(key_to_clear, None)
 
         return jsonify(
             {
@@ -5457,14 +5116,8 @@ def close_structure_api():
             }
         )
 
-    except Exception as exc:
-        print(f"[Close] Error: {exc}")
-        return jsonify(
-            {
-                "ok": False,
-                "error": str(exc),
-            }
-        ), 500
+    finally:
+        SCAN_LOCK.release()
 
 
 @app.route(
@@ -5730,10 +5383,7 @@ def telegram_register_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     return jsonify(
         {
@@ -5782,10 +5432,7 @@ def telegram_unregister_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     return jsonify(
         {
@@ -5902,10 +5549,7 @@ def telegram_plans_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     result = []
 
@@ -5979,18 +5623,14 @@ def admin_reset_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     SCANNER_LAST.clear()
-    print("[Scanner] SCANNER_LAST cleared - next cycle will do full rescan")
 
     return jsonify(
         {
             "ok": True,
-            "message": "Structure memory reset - full rescan will happen next cycle",
+            "message": "Structure memory reset",
         }
     )
 
@@ -6015,10 +5655,7 @@ def admin_db_reset_api():
             cursor.close()
             create_schema(connection)
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     SCANNER_LAST.clear()
 
@@ -6085,10 +5722,7 @@ def admin_database_api():
 
             cursor.close()
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     return jsonify(
         {
@@ -6115,8 +5749,6 @@ def diagnostic_started(pair, timeframe):
     SCANNER_DIAGNOSTICS["scan_count"][key] = (
         SCANNER_DIAGNOSTICS["scan_count"].get(key, 0) + 1
     )
-
-
 
 
 def diagnostic_success(pair, timeframe, result):
