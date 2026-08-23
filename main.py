@@ -4543,11 +4543,11 @@ def scanner_loop():
                                         f"{result['trade_events_now']} "
                                         "trade event(s)"
                                     )
-                        else:
-                            reason = result.get("reason", "")
-                            if reason == "market_closed":
-                                pass
-                                # Silent skip — no log spam on weekends
+                             else:
+                                reason = result.get("reason", "")
+                                if reason == "market_closed":
+                                    pass
+                                    # Silent skip — no log spam on weekends
                             else:
                                 print(
                                     f"[Scanner] {pair} "
