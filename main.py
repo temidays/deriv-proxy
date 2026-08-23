@@ -4650,6 +4650,10 @@ def scanner_loop():
 
     while not SCANNER_STOP.is_set():
         cycle_started = time.time()
+        print(
+        f"[Scanner] Heartbeat "
+        f"{now_utc_string()}"
+        )
 
         try:
             config = scanner_settings()
