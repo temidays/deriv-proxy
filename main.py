@@ -1110,7 +1110,8 @@ def structures_for(pair, timeframe):
             rows = cursor.fetchall()
             cursor.close()
 
-        except Exception:
+        except Exception as save_exc:
+            print(f"[DB] Save failed for {values.get('pair')} {values.get('timeframe')}: {save_exc}")
             connection.rollback()
             raise
         finally:
