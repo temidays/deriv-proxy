@@ -4624,6 +4624,7 @@ def scanner_loop():
                                         )
 
                             except Exception as exc:
+                                import traceback
                                 diagnostic_error(
                                     pair,
                                     timeframe,
@@ -4633,6 +4634,10 @@ def scanner_loop():
                                     f"[Scanner] {pair} "
                                     f"{timeframe} ERROR: "
                                     f"{exc}"
+                                )
+                                print(
+                                    f"[Scanner] TRACEBACK: "
+                                    f"{traceback.format_exc()}"
                                 )
 
                 finally:
