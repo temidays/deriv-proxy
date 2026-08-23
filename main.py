@@ -497,9 +497,12 @@ def canonical_symbol(value):
     if any(raw.upper().startswith(p) for p in SYNTHETIC_PREFIXES):
         return raw.strip()
 
+    # Pass through valid Deriv synthetic symbols
+    clean = raw.strip()
+    if clean and all(c.isalnum() or c == '_' for c in clean):
+        return clean
+
     return ""
-
-
 def unique_values(values):
     result = []
     seen = set()
