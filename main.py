@@ -457,21 +457,7 @@ DB_POOL_STATS = {
 }
 
 def get_pool():
-    global _DB_POOL
-    if _DB_POOL is None and DATABASE_URL:
-        try:
-            _DB_POOL = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=200,
-                dsn=DATABASE_URL,
-                connect_timeout=30,
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            )
-            print("[DB] Connection pool created (max 8 connections)")
-        except Exception as exc:
-            print(f"[DB] Pool creation failed: {exc}")
-            _DB_POOL = None
-    return _DB_POOL
+    return None
 
 if DB_IS_PERSISTENT:
     print(f"[DB] Using PostgreSQL database")
