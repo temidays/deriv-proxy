@@ -462,7 +462,7 @@ def get_pool():
         try:
             _DB_POOL = psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=8,
+                maxconn=200,
                 dsn=DATABASE_URL,
                 connect_timeout=30,
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -705,13 +705,23 @@ def open_database():
 
 
 def db():
-    pool = get_pool()
+    connection = None
 
-    if pool:
-        DB_POOL_STATS["checkouts"] += 1
-        return pool.getconn()
+    try:
+        connection = open_database()
+        return connection
 
-    return open_database()
+    except Exception as exc:
+
+        print(f"[DB] Database error: {exc}")
+
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+        raise
 
 
 def release_connection(connection):
