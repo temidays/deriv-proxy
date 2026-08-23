@@ -4667,27 +4667,39 @@ def scanner_loop():
                             "Set pairs in the app or SCANNER_PAIRS env var."
                         )
                     else:
-                        for target in targets:
-                            print(
-                                f"[Scanner] START {target['pair']} {target['timeframe']}"
-                            )
-                            if SCANNER_STOP.is_set():
-                                break
+for target in targets:
 
-                            pair = target["pair"]
-                            timeframe = target["timeframe"]
+    print(
+        f"[Scanner] START {target['pair']} {target['timeframe']}"
+    )
 
-                            try:
-                                result = continuous_scan_once(
-                                    print(
-                                        f"[Scanner] END {pair} {timeframe}"
-                                    )
-                                    pair,
-                                    timeframe,
-                                    config,
-                                )
+    if SCANNER_STOP.is_set():
+        break
 
-                                if not result:
+    pair = target["pair"]
+    timeframe = target["timeframe"]
+
+    try:
+
+        result = continuous_scan_once(
+            pair,
+            timeframe,
+            config,
+        )
+
+        print(
+            f"[Scanner] END {pair} {timeframe}"
+        )
+
+        if not result:
+
+            result = {
+                "ok": False,
+                "skipped": True,
+                "completed_now": 0,
+                "trade_events_now": 0,
+                "reason": "no_result",
+            }
                                     result = {
                                         "ok": False,
                                         "skipped": True,
