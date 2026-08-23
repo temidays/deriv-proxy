@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def now_utc_string():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -450,6 +451,10 @@ DB_IS_PERSISTENT = bool(DATABASE_URL)
 
 # Connection pool for PostgreSQL
 _DB_POOL = None
+DB_POOL_STATS = {
+    "checkouts": 0,
+    "returns": 0,
+}
 
 def get_pool():
     global _DB_POOL
@@ -700,31 +705,39 @@ def open_database():
 
 
 def db():
-    connection = None
-    try:
-        connection = open_database()
-        return connection
-    except Exception as exc:
-        print(f"[DB] Database error: {exc}")
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
-        raise
+
+    pool = get_pool()
+
+    if pool:
+
+        DB_POOL_STATS["checkouts"] += 1
+
+        return pool.getconn()
+
+    return open_database()
 
 
 def release_connection(connection):
-    """Return connection to pool or close it."""
+    """
+    Return pooled connection to Neon.
+    Close normal connections.
+    """
+
     if connection is None:
         return
+
     try:
+
         pool = get_pool()
+
         if pool:
+            DB_POOL_STATS["returns"] += 1
             pool.putconn(connection)
         else:
             connection.close()
+
     except Exception:
+
         try:
             connection.close()
         except Exception:
@@ -1006,10 +1019,7 @@ def save(structure):
             raise
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
 
 def parse_json_point(row, column):
@@ -1103,10 +1113,7 @@ def structures_for(pair, timeframe):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     return [
         s for s in (
@@ -1137,10 +1144,7 @@ def delete_structure(structure):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
 
 def delete_structure_by_key(structure_key_value):
@@ -1158,10 +1162,7 @@ def delete_structure_by_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
 def structure_for_key(structure_key_value):
     with DB_LOCK:
@@ -1182,10 +1183,7 @@ def structure_for_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     if not row:
         return None
@@ -1225,10 +1223,7 @@ def close_structure_by_key(structure_key_value, reason):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
 
 def close_trade_alerts_for_structure(
@@ -1267,10 +1262,7 @@ def close_trade_alerts_for_structure(
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)s
 
 
 # ============================================================
@@ -3001,10 +2993,7 @@ def get_trade_alert(structure_key_value, chat_id):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
 
 
@@ -3097,10 +3086,7 @@ def save_trade_alert(
             connection.commit()
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
 
 def send_f_notifications(structure):
@@ -3418,10 +3404,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
             cursor.close()
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     if not rows:
         return 0
@@ -3716,10 +3699,7 @@ def check_timeframe_confluence(
             rows = cursor.fetchall()
             cursor.close()
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     for row in rows:
         stage = row["stage"] or row["state"]
@@ -4523,10 +4503,7 @@ def replace_scanner_targets(pairs, timeframes):
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     return targets
 
@@ -4931,6 +4908,8 @@ def health_api():
             "telegram_users": users_count,
             "active_trade_plans": plans_count,
             "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
+            "db_pool_checkouts": DB_POOL_STATS["checkouts"],
+            "db_pool_returns": DB_POOL_STATS["returns"],
             "continuous_scanner": bool(
                 SCANNER_THREAD
                 and SCANNER_THREAD.is_alive()
@@ -5316,10 +5295,7 @@ def structures_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     return jsonify(
         [
@@ -5731,10 +5707,7 @@ def telegram_register_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     return jsonify(
         {
@@ -5783,10 +5756,7 @@ def telegram_unregister_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     return jsonify(
         {
@@ -5903,10 +5873,7 @@ def telegram_plans_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     result = []
 
@@ -5980,10 +5947,7 @@ def admin_reset_api():
             connection.rollback()
             raise
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     SCANNER_LAST.clear()
     print("[Scanner] SCANNER_LAST cleared - next cycle will do full rescan")
@@ -6016,10 +5980,7 @@ def admin_db_reset_api():
             cursor.close()
             create_schema(connection)
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     SCANNER_LAST.clear()
 
@@ -6086,10 +6047,7 @@ def admin_database_api():
 
             cursor.close()
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            release_connection(connection)
 
     return jsonify(
         {
