@@ -301,6 +301,79 @@ SYMBOL_MAP = {
     "CRYETHUSD": "cryETHUSD",
 }
 
+# ============================================================
+# MARKET HOURS
+# ============================================================
+
+# Pairs that trade 24/7 — always scan
+ALWAYS_ON_PREFIXES = (
+    "R_",
+    "1HZ",
+    "BOOM",
+    "CRASH",
+    "STEP",
+    "STPRNG",
+    "JD",
+    "cry",
+)
+
+# Forex and metals — closed on weekends
+FOREX_PREFIXES = (
+    "frx",
+)
+
+# Stock indices — complex hours, skip for now
+INDICES_PREFIXES = (
+    "OTC_",
+)
+
+
+def is_market_open(pair):
+    """
+    Return True if this pair is currently tradeable.
+
+    Synthetics and crypto: always open.
+    Forex and metals: closed Saturday and Sunday.
+    Stock indices: skipped entirely for now.
+    """
+    pair = str(pair).strip()
+
+    # Stock indices — skip entirely
+    if any(pair.startswith(p) for p in INDICES_PREFIXES):
+        return False
+
+    # Synthetics and crypto — always open
+    if any(pair.startswith(p) for p in ALWAYS_ON_PREFIXES):
+        return True
+
+    # Forex and metals — check if it is a weekday
+    if any(pair.startswith(p) for p in FOREX_PREFIXES):
+        now_utc = datetime.now(timezone.utc)
+        weekday = now_utc.weekday()
+
+        # Monday=0, Tuesday=1, ..., Friday=4,
+        # Saturday=5, Sunday=6
+
+        # Forex closes Friday 22:00 UTC
+        # Forex opens Sunday 22:00 UTC
+        if weekday == 5:
+            # Saturday — always closed
+            return False
+
+        if weekday == 6:
+            # Sunday — closed until 22:00 UTC
+            return now_utc.hour >= 22
+
+        if weekday == 4:
+            # Friday — closed after 22:00 UTC
+            return now_utc.hour < 22
+
+        # Monday to Thursday — always open
+        return True
+
+    # Unknown pair type — allow scanning
+    return True
+
 
 DB_LOCK = threading.RLock()
 SCAN_LOCK = threading.Lock()
@@ -4470,13 +4543,18 @@ def scanner_loop():
                                         f"{result['trade_events_now']} "
                                         "trade event(s)"
                                     )
-                                else:
-                                    print(
-                                        f"[Scanner] {pair} "
-                                        f"{timeframe}: OK "
-                                        f"(skipped="
-                                        f"{result.get('skipped')})"
-                                    )
+                        else:
+                            reason = result.get("reason", "")
+                            if reason == "market_closed":
+                                pass
+                                # Silent skip — no log spam on weekends
+                            else:
+                                print(
+                                    f"[Scanner] {pair} "
+                                    f"{timeframe}: OK "
+                                    f"(skipped="
+                                    f"{result.get('skipped')})"
+                                )
 
                             except Exception as exc:
                                 diagnostic_error(
@@ -5806,6 +5884,34 @@ def diagnostic_started(pair, timeframe):
     SCANNER_DIAGNOSTICS["scan_count"][key] = (
         SCANNER_DIAGNOSTICS["scan_count"].get(key, 0) + 1
     )
+
+def continuous_scan_once(pair, timeframe, config):
+    pair = canonical_symbol(pair)
+    timeframe = str(timeframe).upper()
+
+    diagnostic_started(
+        pair,
+        timeframe,
+    )
+
+    # Skip if market is closed for this pair
+    if not is_market_open(pair):
+        return {
+            "ok": True,
+            "pair": pair,
+            "timeframe": timeframe,
+            "skipped": True,
+            "reason": "market_closed",
+            "latest_closed_epoch": 0,
+            "completed_now": 0,
+            "trade_events_now": 0,
+            "active_structures": None,
+        }
+
+    if timeframe not in TIMEFRAME_MAP:
+        raise ValueError(
+            f"Unsupported timeframe: {timeframe}"
+        )
 
 
 def diagnostic_success(pair, timeframe, result):
