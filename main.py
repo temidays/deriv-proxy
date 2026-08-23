@@ -984,9 +984,12 @@ def parse_json_point(row, column):
 
 def row_to_structure(row):
     try:
-        stage = row["stage"] or row["state"]
+        stage = row.get("stage") or row.get("state") or ""
     except Exception:
-        stage = row["state"]
+        try:
+            stage = row["state"]
+        except Exception:
+            return None
 
     structure = {
         "id": row["id"],
@@ -1063,8 +1066,11 @@ def structures_for(pair, timeframe):
             connection.close()
 
     return [
-        row_to_structure(row)
-        for row in rows
+        s for s in (
+            row_to_structure(row)
+            for row in rows
+        )
+        if s is not None
     ]
 
 
@@ -4546,6 +4552,8 @@ def scanner_loop():
         f"(interval={config['interval']} seconds)"
     )
 
+    consecutive_errors = 0
+
     while not SCANNER_STOP.is_set():
         cycle_started = time.time()
 
@@ -4622,7 +4630,14 @@ def scanner_loop():
                     SCAN_LOCK.release()
 
         except Exception as exc:
-            print(f"[Scanner] OUTER ERROR: {exc}")
+            consecutive_errors += 1
+            print(f"[Scanner] OUTER ERROR ({consecutive_errors}): {exc}")
+            if consecutive_errors > 10:
+                print("[Scanner] Too many errors - restarting scanner thread")
+                consecutive_errors = 0
+
+        else:
+            consecutive_errors = 0
 
         elapsed = time.time() - cycle_started
         config = scanner_settings()
