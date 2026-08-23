@@ -2953,11 +2953,8 @@ def active_telegram_users():
             cursor.close()
             return result_rows
 
-        finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            finally:
+                release_connection(connection)
 
 
 def get_trade_alert(structure_key_value, chat_id):
@@ -4147,23 +4144,11 @@ def run_scan(
             discovered += 1
 
     # Monitor active trade plans for TP/SL.
-    for target in (
-        database_scanner_targets()
-    ):
-        target_pair = target["pair"]
-        target_tf = target["timeframe"]
-
-        if (
-            target_pair != pair
-            or target_tf != timeframe
-        ):
-            continue
-
-        trade_events_now += monitor_trade_alerts(
-            pair,
-            timeframe,
-            candles,
-        )
+    trade_events_now += monitor_trade_alerts(
+        pair,
+        timeframe,
+        candles,
+    )
 
     final_signals = structures_for(
         pair,
@@ -4649,6 +4634,10 @@ def scanner_loop():
     consecutive_errors = 0
 
     while not SCANNER_STOP.is_set():
+        print(
+        f"[Scanner] LOOP START "
+        f"{now_utc_string()}"
+        )
         cycle_started = time.time()
         print(
         f"[Scanner] Heartbeat "
