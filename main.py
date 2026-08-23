@@ -4734,6 +4734,10 @@ def health_api():
                 and SCANNER_THREAD.is_alive()
                 and not SCANNER_STOP.is_set()
             ),
+            "scanner_thread_alive": bool(
+            SCANNER_THREAD
+            and SCANNER_THREAD.is_alive()
+            ),
             "scanner_interval_seconds": config["interval"],
             "g_min_reach": G_MIN_REACH,
             "targets": targets,
