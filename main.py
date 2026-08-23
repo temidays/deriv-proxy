@@ -4667,7 +4667,7 @@ def scanner_loop():
                             "Set pairs in the app or SCANNER_PAIRS env var."
                         )
                     else:
-for target in targets:
+                        for target in targets:
 
     print(
         f"[Scanner] START {target['pair']} {target['timeframe']}"
