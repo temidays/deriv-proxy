@@ -5944,6 +5944,16 @@ def continuous_scan_once(pair, timeframe, config):
     pair = canonical_symbol(pair)
     timeframe = str(timeframe).upper()
 
+    # Skip if symbol could not be resolved
+    if not pair:
+        return {
+            "ok": False,
+            "reason": "unknown_symbol",
+            "skipped": True,
+            "completed_now": 0,
+            "trade_events_now": 0,
+        }
+
     diagnostic_started(
         pair,
         timeframe,
