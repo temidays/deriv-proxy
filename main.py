@@ -690,23 +690,12 @@ def open_database():
             "No DATABASE_URL configured."
         )
 
-    pool = get_pool()
-    if pool:
-        try:
-            connection = pool.getconn()
-            connection.autocommit = False
-            return connection
-        except Exception as exc:
-            print(f"[DB] Pool getconn failed: {exc}")
-
-    # Fallback to direct connection
     connection = psycopg2.connect(
         DATABASE_URL,
         connect_timeout=30,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
     connection.autocommit = False
-    create_schema(connection)
     return connection
 
 
@@ -719,11 +708,7 @@ def db():
         print(f"[DB] Database error: {exc}")
         if connection is not None:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
                 pass
         raise
@@ -1022,16 +1007,9 @@ def save(structure):
 
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 def parse_json_point(row, column):
@@ -1126,16 +1104,9 @@ def structures_for(pair, timeframe):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     return [
         s for s in (
@@ -1167,16 +1138,9 @@ def delete_structure(structure):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 def delete_structure_by_key(structure_key_value):
@@ -1195,16 +1159,9 @@ def delete_structure_by_key(structure_key_value):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 def structure_for_key(structure_key_value):
     with DB_LOCK:
@@ -1226,16 +1183,9 @@ def structure_for_key(structure_key_value):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     if not row:
         return None
@@ -1276,16 +1226,9 @@ def close_structure_by_key(structure_key_value, reason):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 def close_trade_alerts_for_structure(
@@ -1325,16 +1268,9 @@ def close_trade_alerts_for_structure(
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 # ============================================================
@@ -3036,16 +2972,9 @@ def active_telegram_users():
 
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 def get_trade_alert(structure_key_value, chat_id):
@@ -3073,16 +3002,9 @@ def get_trade_alert(structure_key_value, chat_id):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 
@@ -3176,16 +3098,9 @@ def save_trade_alert(
 
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
 
 def send_f_notifications(structure):
@@ -3503,16 +3418,9 @@ def monitor_trade_alerts(pair, timeframe, candles):
             return result_rows
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     if not rows:
         return 0
@@ -3808,16 +3716,9 @@ def check_timeframe_confluence(
             cursor.close()
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     for row in rows:
         stage = row["stage"] or row["state"]
@@ -4607,16 +4508,9 @@ def replace_scanner_targets(pairs, timeframes):
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     return targets
 
@@ -5405,16 +5299,9 @@ def structures_api():
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     return jsonify(
         [
@@ -5827,16 +5714,9 @@ def telegram_register_api():
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     return jsonify(
         {
@@ -5886,16 +5766,9 @@ def telegram_unregister_api():
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     return jsonify(
         {
@@ -6013,16 +5886,9 @@ def telegram_plans_api():
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     result = []
 
@@ -6097,16 +5963,9 @@ def admin_reset_api():
             raise
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     SCANNER_LAST.clear()
 
@@ -6139,16 +5998,9 @@ def admin_db_reset_api():
             create_schema(connection)
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     SCANNER_LAST.clear()
 
@@ -6216,16 +6068,9 @@ def admin_database_api():
             cursor.close()
         finally:
             try:
-                pool = get_pool()
-                if pool:
-                    pool.putconn(connection)
-                else:
-                    connection.close()
+                connection.close()
             except Exception:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                pass
 
     return jsonify(
         {
