@@ -1021,7 +1021,17 @@ def save(structure):
             raise
 
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def parse_json_point(row, column):
@@ -1115,7 +1125,17 @@ def structures_for(pair, timeframe):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     return [
         s for s in (
@@ -1146,7 +1166,17 @@ def delete_structure(structure):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def delete_structure_by_key(structure_key_value):
@@ -1164,7 +1194,17 @@ def delete_structure_by_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 def structure_for_key(structure_key_value):
     with DB_LOCK:
@@ -1185,7 +1225,17 @@ def structure_for_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     if not row:
         return None
@@ -1225,7 +1275,17 @@ def close_structure_by_key(structure_key_value, reason):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def close_trade_alerts_for_structure(
@@ -1264,7 +1324,17 @@ def close_trade_alerts_for_structure(
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 # ============================================================
@@ -2965,7 +3035,17 @@ def active_telegram_users():
             return result_rows
 
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def get_trade_alert(structure_key_value, chat_id):
@@ -2992,7 +3072,17 @@ def get_trade_alert(structure_key_value, chat_id):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 
@@ -3085,7 +3175,17 @@ def save_trade_alert(
             connection.commit()
 
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def send_f_notifications(structure):
@@ -3402,7 +3502,17 @@ def monitor_trade_alerts(pair, timeframe, candles):
             cursor.close()
             return result_rows
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     if not rows:
         return 0
@@ -3697,7 +3807,17 @@ def check_timeframe_confluence(
             rows = cursor.fetchall()
             cursor.close()
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     for row in rows:
         stage = row["stage"] or row["state"]
@@ -4486,7 +4606,17 @@ def replace_scanner_targets(pairs, timeframes):
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     return targets
 
@@ -5274,7 +5404,17 @@ def structures_api():
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     return jsonify(
         [
@@ -5686,7 +5826,17 @@ def telegram_register_api():
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     return jsonify(
         {
@@ -5735,7 +5885,17 @@ def telegram_unregister_api():
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     return jsonify(
         {
@@ -5852,7 +6012,17 @@ def telegram_plans_api():
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     result = []
 
@@ -5926,7 +6096,17 @@ def admin_reset_api():
             connection.rollback()
             raise
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     SCANNER_LAST.clear()
 
@@ -5958,7 +6138,17 @@ def admin_db_reset_api():
             cursor.close()
             create_schema(connection)
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     SCANNER_LAST.clear()
 
@@ -6025,7 +6215,17 @@ def admin_database_api():
 
             cursor.close()
         finally:
-            connection.close()
+            try:
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     return jsonify(
         {
