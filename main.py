@@ -2952,9 +2952,9 @@ def active_telegram_users():
             result_rows = cursor.fetchall()
             cursor.close()
             return result_rows
-
-            finally:
-                release_connection(connection)
+            
+        finally:
+            release_connection(connection)
 
 
 def get_trade_alert(structure_key_value, chat_id):
