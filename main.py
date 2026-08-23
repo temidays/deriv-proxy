@@ -4521,18 +4521,41 @@ def continuous_scan_once(pair, timeframe, config):
 
         return result
 
-    result = run_scan(
-        pair=pair,
-        timeframe=timeframe,
-        candles=candles,
-        strength=config["strength"],
-        bos_mode=config["bos"],
-        min_atr=config["min_atr"],
-        expansion_atr=config["expansion_atr"],
-        displacement_atr=config["displacement_atr"],
-        min_bars=config["min_bars"],
-        fib_ratio=config["fib_ratio"],
-    )
+    try:
+        result = run_scan(
+            pair=pair,
+            timeframe=timeframe,
+            candles=candles,
+            strength=config["strength"],
+            bos_mode=config["bos"],
+            min_atr=config["min_atr"],
+            expansion_atr=config["expansion_atr"],
+            displacement_atr=config["displacement_atr"],
+            min_bars=config["min_bars"],
+            fib_ratio=config["fib_ratio"],
+        )
+    except Exception as exc:
+        diagnostic_error(pair, timeframe, exc)
+        print(f"[Scanner] {pair} {timeframe} run_scan ERROR: {exc}")
+        return {
+            "ok": False,
+            "pair": pair,
+            "timeframe": timeframe,
+            "skipped": False,
+            "completed_now": 0,
+            "trade_events_now": 0,
+            "error": str(exc),
+        }
+
+    if not result:
+        return {
+            "ok": False,
+            "pair": pair,
+            "timeframe": timeframe,
+            "skipped": False,
+            "completed_now": 0,
+            "trade_events_now": 0,
+        }
 
     SCANNER_LAST[key] = latest_epoch
 
