@@ -4268,8 +4268,13 @@ def database_scanner_targets():
 
 def effective_scanner_targets(config=None):
     stored = database_scanner_targets()
+
     if stored:
-        return stored
+        # Filter out OTC indices regardless of what is stored
+        return [
+            t for t in stored
+            if not t["pair"].startswith("OTC_")
+        ]
 
     config = config or scanner_settings()
 
@@ -4283,6 +4288,7 @@ def effective_scanner_targets(config=None):
         }
         for pair in config["pairs"]
         for timeframe in config["timeframes"]
+        if not pair.startswith("OTC_")
     ]
 
 
