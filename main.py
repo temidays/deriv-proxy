@@ -4571,36 +4571,33 @@ def continuous_scan_once(pair, timeframe, config):
     latest_epoch = candles[-1]["epoch"]
     key = f"{pair}|{timeframe}"
 
-    if SCANNER_LAST.get(key) == latest_epoch:
-        # Only skip if we already have structures for this pair/timeframe
-        # If database is empty, always do a full scan
-        existing = structures_for(pair, timeframe)
-        if existing:
-            events = monitor_trade_alerts(
-                pair,
-                timeframe,
-                candles,
-            )
+    # Skip only when candles unchanged AND we have structures saved
+    # This ensures empty pairs always get a full scan
+    if False and SCANNER_LAST.get(key) == latest_epoch:  # Skip disabled - always scan
+        events = monitor_trade_alerts(
+            pair,
+            timeframe,
+            candles,
+        )
 
-            result = {
-                "ok": True,
-                "pair": pair,
-                "timeframe": timeframe,
-                "skipped": True,
-                "latest_closed_epoch": latest_epoch,
-                "completed_now": 0,
-                "trade_events_now": events,
-                "active_structures": None,
-            }
+        result = {
+            "ok": True,
+            "pair": pair,
+            "timeframe": timeframe,
+            "skipped": True,
+            "latest_closed_epoch": latest_epoch,
+            "completed_now": 0,
+            "trade_events_now": events,
+            "active_structures": None,
+        }
 
-            diagnostic_success(
-                pair,
-                timeframe,
-                result,
-            )
+        diagnostic_success(
+            pair,
+            timeframe,
+            result,
+        )
 
-            return result
-        # No structures yet - fall through to full scan
+        return result
 
     try:
         result = run_scan(
