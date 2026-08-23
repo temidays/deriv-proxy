@@ -182,6 +182,41 @@ SYMBOL_MAP = {
     "CRASH900": "CRASH900",
     "CRASH1000": "CRASH1000",
 
+    # Step Index
+    "STPRNG": "STPRNG",
+    "STPRNG2": "STPRNG2",
+    "STPRNG3": "STPRNG3",
+    "STPRNG4": "STPRNG4",
+    "STPRNG5": "STPRNG5",
+
+    # Jump Diffusion
+    "JD10": "JD10",
+    "JD25": "JD25",
+    "JD50": "JD50",
+    "JD75": "JD75",
+    "JD100": "JD100",
+
+    # Boom extended
+    "BOOM50": "BOOM50",
+    "BOOM150N": "BOOM150N",
+    "BOOM300N": "BOOM300N",
+    "BOOM600": "BOOM600",
+    "BOOM900": "BOOM900",
+
+    # Crash extended
+    "CRASH50": "CRASH50",
+    "CRASH150N": "CRASH150N",
+    "CRASH300N": "CRASH300N",
+    "CRASH600": "CRASH600",
+    "CRASH900": "CRASH900",
+
+    # 1Hz Volatility
+    "1HZ10V": "1HZ10V",
+    "1HZ25V": "1HZ25V",
+    "1HZ50V": "1HZ50V",
+    "1HZ75V": "1HZ75V",
+    "1HZ100V": "1HZ100V",
+
 
     # Step and Jump Indices
     "STPRNG": "STPRNG",
@@ -452,6 +487,15 @@ def canonical_symbol(value):
 
         if candidate in SYMBOL_MAP.values():
             return candidate
+
+    # Pass through unknown symbols that look like
+    # valid Deriv synthetic indices
+    SYNTHETIC_PREFIXES = (
+        "BOOM", "CRASH", "STPRNG", "JD",
+        "1HZ", "R_", "STEP",
+    )
+    if any(raw.upper().startswith(p) for p in SYNTHETIC_PREFIXES):
+        return raw.strip()
 
     return ""
 
