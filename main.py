@@ -6101,43 +6101,7 @@ def diagnostic_started(pair, timeframe):
         SCANNER_DIAGNOSTICS["scan_count"].get(key, 0) + 1
     )
 
-def continuous_scan_once(pair, timeframe, config):
-    pair = canonical_symbol(pair)
-    timeframe = str(timeframe).upper()
 
-    # Skip if symbol could not be resolved
-    if not pair:
-        return {
-            "ok": False,
-            "reason": "unknown_symbol",
-            "skipped": True,
-            "completed_now": 0,
-            "trade_events_now": 0,
-        }
-
-    diagnostic_started(
-        pair,
-        timeframe,
-    )
-
-    # Skip if market is closed for this pair
-    if not is_market_open(pair):
-        return {
-            "ok": True,
-            "pair": pair,
-            "timeframe": timeframe,
-            "skipped": True,
-            "reason": "market_closed",
-            "latest_closed_epoch": 0,
-            "completed_now": 0,
-            "trade_events_now": 0,
-            "active_structures": None,
-        }
-
-    if timeframe not in TIMEFRAME_MAP:
-        raise ValueError(
-            f"Unsupported timeframe: {timeframe}"
-        )
 
 
 def diagnostic_success(pair, timeframe, result):
