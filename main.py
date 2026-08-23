@@ -12,7 +12,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def now_utc_string():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -451,13 +450,23 @@ DB_IS_PERSISTENT = bool(DATABASE_URL)
 
 # Connection pool for PostgreSQL
 _DB_POOL = None
-DB_POOL_STATS = {
-    "checkouts": 0,
-    "returns": 0,
-}
 
 def get_pool():
-    return None
+    global _DB_POOL
+    if _DB_POOL is None and DATABASE_URL:
+        try:
+            _DB_POOL = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=8,
+                dsn=DATABASE_URL,
+                connect_timeout=30,
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            )
+            print("[DB] Connection pool created (max 8 connections)")
+        except Exception as exc:
+            print(f"[DB] Pool creation failed: {exc}")
+            _DB_POOL = None
+    return _DB_POOL
 
 if DB_IS_PERSISTENT:
     print(f"[DB] Using PostgreSQL database")
@@ -692,41 +701,29 @@ def open_database():
 
 def db():
     connection = None
-
     try:
         connection = open_database()
         return connection
-
     except Exception as exc:
-
         print(f"[DB] Database error: {exc}")
-
         if connection is not None:
             try:
                 connection.close()
             except Exception:
                 pass
-
         raise
 
 
 def release_connection(connection):
-    """
-    Return connection to pool or close it.
-    """
-
+    """Return connection to pool or close it."""
     if connection is None:
         return
-
     try:
         pool = get_pool()
-
         if pool:
-            DB_POOL_STATS["returns"] += 1
             pool.putconn(connection)
         else:
             connection.close()
-
     except Exception:
         try:
             connection.close()
@@ -1009,7 +1006,10 @@ def save(structure):
             raise
 
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def parse_json_point(row, column):
@@ -1103,7 +1103,10 @@ def structures_for(pair, timeframe):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     return [
         s for s in (
@@ -1134,7 +1137,10 @@ def delete_structure(structure):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def delete_structure_by_key(structure_key_value):
@@ -1152,7 +1158,10 @@ def delete_structure_by_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 def structure_for_key(structure_key_value):
     with DB_LOCK:
@@ -1173,7 +1182,10 @@ def structure_for_key(structure_key_value):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     if not row:
         return None
@@ -1213,7 +1225,10 @@ def close_structure_by_key(structure_key_value, reason):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def close_trade_alerts_for_structure(
@@ -1251,9 +1266,11 @@ def close_trade_alerts_for_structure(
         except Exception:
             connection.rollback()
             raise
-
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -2942,7 +2959,6 @@ def active_telegram_users():
 
         try:
             cursor = connection.cursor()
-
             cursor.execute(
                 """
                 SELECT chat_id
@@ -2950,15 +2966,15 @@ def active_telegram_users():
                 WHERE active=1
                 """
             )
-
             result_rows = cursor.fetchall()
-
             cursor.close()
-
             return result_rows
 
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def get_trade_alert(structure_key_value, chat_id):
@@ -2985,7 +3001,10 @@ def get_trade_alert(structure_key_value, chat_id):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 
@@ -3078,7 +3097,10 @@ def save_trade_alert(
             connection.commit()
 
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def send_f_notifications(structure):
@@ -3376,7 +3398,6 @@ def monitor_trade_alerts(pair, timeframe, candles):
         connection = db()
         try:
             cursor = connection.cursor()
-
             cursor.execute(
                 """
                 SELECT *
@@ -3390,13 +3411,16 @@ def monitor_trade_alerts(pair, timeframe, candles):
                     timeframe,
                 ),
             )
-
+            result_rows = cursor.fetchall()
             rows = cursor.fetchall()
-
             cursor.close()
-
+            cursor.close()
+            return result_rows
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     if not rows:
         return 0
@@ -3691,7 +3715,10 @@ def check_timeframe_confluence(
             rows = cursor.fetchall()
             cursor.close()
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     for row in rows:
         stage = row["stage"] or row["state"]
@@ -4148,11 +4175,23 @@ def run_scan(
             discovered += 1
 
     # Monitor active trade plans for TP/SL.
-    trade_events_now += monitor_trade_alerts(
-        pair,
-        timeframe,
-        candles,
-    )
+    for target in (
+        database_scanner_targets()
+    ):
+        target_pair = target["pair"]
+        target_tf = target["timeframe"]
+
+        if (
+            target_pair != pair
+            or target_tf != timeframe
+        ):
+            continue
+
+        trade_events_now += monitor_trade_alerts(
+            pair,
+            timeframe,
+            candles,
+        )
 
     final_signals = structures_for(
         pair,
@@ -4483,7 +4522,10 @@ def replace_scanner_targets(pairs, timeframes):
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     return targets
 
@@ -4638,15 +4680,7 @@ def scanner_loop():
     consecutive_errors = 0
 
     while not SCANNER_STOP.is_set():
-        print(
-        f"[Scanner] LOOP START "
-        f"{now_utc_string()}"
-        )
         cycle_started = time.time()
-        print(
-        f"[Scanner] Heartbeat "
-        f"{now_utc_string()}"
-        )
 
         try:
             config = scanner_settings()
@@ -4666,93 +4700,70 @@ def scanner_loop():
                             "[Scanner] No targets configured. "
                             "Set pairs in the app or SCANNER_PAIRS env var."
                         )
-                        
-            else:
-                for target in targets:
+                    else:
+                        for target in targets:
+                            if SCANNER_STOP.is_set():
+                                break
 
-                print(
-                f"[Scanner] START {target['pair']} {target['timeframe']}"
-                )
+                            pair = target["pair"]
+                            timeframe = target["timeframe"]
 
-    if SCANNER_STOP.is_set():
-        break
+                            try:
+                                result = continuous_scan_once(
+                                    pair,
+                                    timeframe,
+                                    config,
+                                )
 
-    pair = target["pair"]
-    timeframe = target["timeframe"]
+                                if not result:
+                                    result = {
+                                        "ok": False,
+                                        "skipped": True,
+                                        "completed_now": 0,
+                                        "trade_events_now": 0,
+                                        "reason": "no_result",
+                                    }
 
-    try:
+                                if result.get("completed_now", 0):
+                                    print(
+                                        f"[Scanner] {pair} "
+                                        f"{timeframe}: "
+                                        f"{result['completed_now']} "
+                                        "new structure(s)"
+                                    )
+                                elif result.get("trade_events_now", 0):
+                                    print(
+                                        f"[Scanner] {pair} "
+                                        f"{timeframe}: "
+                                        f"{result['trade_events_now']} "
+                                        "trade event(s)"
+                                    )
+                                else:
+                                    reason = result.get("reason", "")
+                                    if reason != "market_closed":
+                                        print(
+                                            f"[Scanner] {pair} "
+                                            f"{timeframe}: OK "
+                                            f"(skipped="
+                                            f"{result.get('skipped')})"
+                                        )
 
-        result = continuous_scan_once(
-            pair,
-            timeframe,
-            config,
-        )
-
-        print(
-            f"[Scanner] END {pair} {timeframe}"
-        )
-
-        if not result:
-
-            result = {
-                "ok": False,
-                "skipped": True,
-                "completed_now": 0,
-                "trade_events_now": 0,
-                "reason": "no_result",
-            }
-
-        if result.get("completed_now", 0):
-
-            print(
-                f"[Scanner] {pair} "
-                f"{timeframe}: "
-                f"{result['completed_now']} "
-                "new structure(s)"
-            )
-
-        elif result.get("trade_events_now", 0):
-
-            print(
-                f"[Scanner] {pair} "
-                f"{timeframe}: "
-                f"{result['trade_events_now']} "
-                "trade event(s)"
-            )
-
-        else:
-
-            reason = result.get("reason", "")
-
-            if reason != "market_closed":
-
-                print(
-                    f"[Scanner] {pair} "
-                    f"{timeframe}: OK "
-                    f"(skipped="
-                    f"{result.get('skipped')})"
-                )
-
-    except Exception as exc:
-
-        import traceback
-
-        diagnostic_error(
-            pair,
-            timeframe,
-            exc,
-        )
-
-        print(
-            f"[Scanner] {pair} "
-            f"{timeframe} ERROR: "
-            f"{exc}"
-        )
-
-        print(
-            f"[Scanner] TRACEBACK: "
-            f"{traceback.format_exc()}"
-        )
+                            except Exception as exc:
+                                import traceback
+                                diagnostic_error(
+                                    pair,
+                                    timeframe,
+                                    exc,
+                                )
+                                print(
+                                    f"[Scanner] {pair} "
+                                    f"{timeframe} ERROR: "
+                                    f"{exc}"
+                                )
+                                print(
+                                    f"[Scanner] TRACEBACK: "
+                                    f"{traceback.format_exc()}"
+                                )
 
                 finally:
                     SCAN_LOCK.release()
@@ -4931,9 +4942,6 @@ def health_api():
             "scanner_interval_seconds": config["interval"],
             "g_min_reach": G_MIN_REACH,
             "targets": targets,
-            
-            "db_pool_checkouts": DB_POOL_STATS["checkouts"],
-            "db_pool_returns": DB_POOL_STATS["returns"],
         }
     )
 
@@ -5307,7 +5315,10 @@ def structures_api():
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     return jsonify(
         [
@@ -5719,7 +5730,10 @@ def telegram_register_api():
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     return jsonify(
         {
@@ -5768,7 +5782,10 @@ def telegram_unregister_api():
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     return jsonify(
         {
@@ -5885,7 +5902,10 @@ def telegram_plans_api():
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     result = []
 
@@ -5959,7 +5979,10 @@ def admin_reset_api():
             connection.rollback()
             raise
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     SCANNER_LAST.clear()
     print("[Scanner] SCANNER_LAST cleared - next cycle will do full rescan")
@@ -5992,7 +6015,10 @@ def admin_db_reset_api():
             cursor.close()
             create_schema(connection)
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     SCANNER_LAST.clear()
 
@@ -6059,7 +6085,10 @@ def admin_database_api():
 
             cursor.close()
         finally:
-            release_connection(connection)
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     return jsonify(
         {
