@@ -4549,18 +4549,15 @@ def scanner_loop():
                                         f"{result['trade_events_now']} "
                                         "trade event(s)"
                                     )
-                             else:
-                                reason = result.get("reason", "")
-                                if reason == "market_closed":
-                                    pass
-                                    # Silent skip — no log spam on weekends
-                            else:
-                                print(
-                                    f"[Scanner] {pair} "
-                                    f"{timeframe}: OK "
-                                    f"(skipped="
-                                    f"{result.get('skipped')})"
-                                )
+                                else:
+                                    reason = result.get("reason", "")
+                                    if reason != "market_closed":
+                                        print(
+                                            f"[Scanner] {pair} "
+                                            f"{timeframe}: OK "
+                                            f"(skipped="
+                                            f"{result.get('skipped')})"
+                                        )
 
                             except Exception as exc:
                                 diagnostic_error(
@@ -4593,6 +4590,7 @@ def scanner_loop():
         SCANNER_STOP.wait(wait_seconds)
 
     print("[Scanner] Stopped")
+
 
 
 def start_scanner():
