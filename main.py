@@ -5968,11 +5968,12 @@ def admin_reset_api():
                 pass
 
     SCANNER_LAST.clear()
+    print("[Scanner] SCANNER_LAST cleared - next cycle will do full rescan")
 
     return jsonify(
         {
             "ok": True,
-            "message": "Structure memory reset",
+            "message": "Structure memory reset - full rescan will happen next cycle",
         }
     )
 
