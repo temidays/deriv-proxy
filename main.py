@@ -4667,17 +4667,17 @@ def scanner_loop():
                             "Set pairs in the app or SCANNER_PAIRS env var."
                         )
                     else:
-                         for target in targets:
+for target in targets:
 
-                        print(
-                            f"[Scanner] START {target['pair']} {target['timeframe']}"
-                        )
+    print(
+        f"[Scanner] START {target['pair']} {target['timeframe']}"
+    )
 
-                        if SCANNER_STOP.is_set():
-                            break
+    if SCANNER_STOP.is_set():
+        break
 
-                        pair = target["pair"]
-                        timeframe = target["timeframe"]
+    pair = target["pair"]
+    timeframe = target["timeframe"]
 
     try:
 
@@ -4700,54 +4700,58 @@ def scanner_loop():
                 "trade_events_now": 0,
                 "reason": "no_result",
             }
-                                    result = {
-                                        "ok": False,
-                                        "skipped": True,
-                                        "completed_now": 0,
-                                        "trade_events_now": 0,
-                                        "reason": "no_result",
-                                    }
 
-                                if result.get("completed_now", 0):
-                                    print(
-                                        f"[Scanner] {pair} "
-                                        f"{timeframe}: "
-                                        f"{result['completed_now']} "
-                                        "new structure(s)"
-                                    )
-                                elif result.get("trade_events_now", 0):
-                                    print(
-                                        f"[Scanner] {pair} "
-                                        f"{timeframe}: "
-                                        f"{result['trade_events_now']} "
-                                        "trade event(s)"
-                                    )
-                                else:
-                                    reason = result.get("reason", "")
-                                    if reason != "market_closed":
-                                        print(
-                                            f"[Scanner] {pair} "
-                                            f"{timeframe}: OK "
-                                            f"(skipped="
-                                            f"{result.get('skipped')})"
-                                        )
+        if result.get("completed_now", 0):
 
-                            except Exception as exc:
-                                import traceback
-                                diagnostic_error(
-                                    pair,
-                                    timeframe,
-                                    exc,
-                                )
-                                print(
-                                    f"[Scanner] {pair} "
-                                    f"{timeframe} ERROR: "
-                                    f"{exc}"
-                                )
-                                print(
-                                    f"[Scanner] TRACEBACK: "
-                                    f"{traceback.format_exc()}"
-                                )
+            print(
+                f"[Scanner] {pair} "
+                f"{timeframe}: "
+                f"{result['completed_now']} "
+                "new structure(s)"
+            )
+
+        elif result.get("trade_events_now", 0):
+
+            print(
+                f"[Scanner] {pair} "
+                f"{timeframe}: "
+                f"{result['trade_events_now']} "
+                "trade event(s)"
+            )
+
+        else:
+
+            reason = result.get("reason", "")
+
+            if reason != "market_closed":
+
+                print(
+                    f"[Scanner] {pair} "
+                    f"{timeframe}: OK "
+                    f"(skipped="
+                    f"{result.get('skipped')})"
+                )
+
+    except Exception as exc:
+
+        import traceback
+
+        diagnostic_error(
+            pair,
+            timeframe,
+            exc,
+        )
+
+        print(
+            f"[Scanner] {pair} "
+            f"{timeframe} ERROR: "
+            f"{exc}"
+        )
+
+        print(
+            f"[Scanner] TRACEBACK: "
+            f"{traceback.format_exc()}"
+        )
 
                 finally:
                     SCAN_LOCK.release()
