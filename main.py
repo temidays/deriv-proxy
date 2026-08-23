@@ -705,13 +705,10 @@ def open_database():
 
 
 def db():
-
     pool = get_pool()
 
     if pool:
-
         DB_POOL_STATS["checkouts"] += 1
-
         return pool.getconn()
 
     return open_database()
@@ -719,15 +716,13 @@ def db():
 
 def release_connection(connection):
     """
-    Return pooled connection to Neon.
-    Close normal connections.
+    Return connection to pool or close it.
     """
 
     if connection is None:
         return
 
     try:
-
         pool = get_pool()
 
         if pool:
@@ -737,7 +732,6 @@ def release_connection(connection):
             connection.close()
 
     except Exception:
-
         try:
             connection.close()
         except Exception:
@@ -4909,8 +4903,6 @@ def health_api():
             "telegram_users": users_count,
             "active_trade_plans": plans_count,
             "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
-            "db_pool_checkouts": DB_POOL_STATS["checkouts"],
-            "db_pool_returns": DB_POOL_STATS["returns"],
             "continuous_scanner": bool(
                 SCANNER_THREAD
                 and SCANNER_THREAD.is_alive()
@@ -4923,6 +4915,9 @@ def health_api():
             "scanner_interval_seconds": config["interval"],
             "g_min_reach": G_MIN_REACH,
             "targets": targets,
+            
+            "db_pool_checkouts": DB_POOL_STATS["checkouts"],
+            "db_pool_returns": DB_POOL_STATS["returns"],
         }
     )
 
