@@ -4,6 +4,7 @@ import json
 import os
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import tempfile
 import threading
 import time
@@ -447,6 +448,26 @@ CONFLUENCE_MIN_RANK = max(
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 DB_IS_PERSISTENT = bool(DATABASE_URL)
 
+# Connection pool for PostgreSQL
+_DB_POOL = None
+
+def get_pool():
+    global _DB_POOL
+    if _DB_POOL is None and DATABASE_URL:
+        try:
+            _DB_POOL = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=8,
+                dsn=DATABASE_URL,
+                connect_timeout=30,
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            )
+            print("[DB] Connection pool created (max 8 connections)")
+        except Exception as exc:
+            print(f"[DB] Pool creation failed: {exc}")
+            _DB_POOL = None
+    return _DB_POOL
+
 if DB_IS_PERSISTENT:
     print(f"[DB] Using PostgreSQL database")
 else:
@@ -669,12 +690,21 @@ def open_database():
             "No DATABASE_URL configured."
         )
 
+    pool = get_pool()
+    if pool:
+        try:
+            connection = pool.getconn()
+            connection.autocommit = False
+            return connection
+        except Exception as exc:
+            print(f"[DB] Pool getconn failed: {exc}")
+
+    # Fallback to direct connection
     connection = psycopg2.connect(
         DATABASE_URL,
         connect_timeout=30,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
-
     connection.autocommit = False
     create_schema(connection)
     return connection
@@ -689,10 +719,31 @@ def db():
         print(f"[DB] Database error: {exc}")
         if connection is not None:
             try:
-                connection.close()
+                pool = get_pool()
+                if pool:
+                    pool.putconn(connection)
+                else:
+                    connection.close()
             except Exception:
                 pass
         raise
+
+
+def release_connection(connection):
+    """Return connection to pool or close it."""
+    if connection is None:
+        return
+    try:
+        pool = get_pool()
+        if pool:
+            pool.putconn(connection)
+        else:
+            connection.close()
+    except Exception:
+        try:
+            connection.close()
+        except Exception:
+            pass
 
 
 # ============================================================
