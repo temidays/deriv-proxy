@@ -4668,6 +4668,9 @@ def scanner_loop():
                         )
                     else:
                         for target in targets:
+                            print(
+                                f"[Scanner] START {target['pair']} {target['timeframe']}"
+                            )
                             if SCANNER_STOP.is_set():
                                 break
 
@@ -4676,6 +4679,9 @@ def scanner_loop():
 
                             try:
                                 result = continuous_scan_once(
+                                    print(
+                                        f"[Scanner] END {pair} {timeframe}"
+                                    )
                                     pair,
                                     timeframe,
                                     config,
