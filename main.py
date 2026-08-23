@@ -1262,8 +1262,8 @@ def close_trade_alerts_for_structure(
             connection.rollback()
             raise
             
-        finally:
-            release_connection(connection)s
+            finally:
+                release_connection(connection)s
 
 
 # ============================================================
