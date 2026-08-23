@@ -4375,9 +4375,9 @@ def replace_scanner_targets(pairs, timeframes):
         for timeframe in canonical_timeframes
     ]
 
-    if len(targets) > 50:
+    if len(targets) > 500:
         raise ValueError(
-            "Maximum 50 pair/timeframe combinations"
+            "Maximum 500 pair/timeframe combinations"
         )
 
     now = int(time.time())
