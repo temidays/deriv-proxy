@@ -3398,6 +3398,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
         connection = db()
         try:
             cursor = connection.cursor()
+
             cursor.execute(
                 """
                 SELECT *
@@ -3411,11 +3412,11 @@ def monitor_trade_alerts(pair, timeframe, candles):
                     timeframe,
                 ),
             )
-            result_rows = cursor.fetchall()
+
             rows = cursor.fetchall()
+
             cursor.close()
-            cursor.close()
-            return result_rows
+
         finally:
             try:
                 connection.close()
