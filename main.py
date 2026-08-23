@@ -4666,6 +4666,7 @@ def scanner_loop():
                             "[Scanner] No targets configured. "
                             "Set pairs in the app or SCANNER_PAIRS env var."
                         )
+                        
                     else:
                         for target in targets:
 
