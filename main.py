@@ -4599,6 +4599,15 @@ def scanner_loop():
                                     config,
                                 )
 
+                                if not result:
+                                    result = {
+                                        "ok": False,
+                                        "skipped": True,
+                                        "completed_now": 0,
+                                        "trade_events_now": 0,
+                                        "reason": "no_result",
+                                    }
+
                                 if result.get("completed_now", 0):
                                     print(
                                         f"[Scanner] {pair} "
