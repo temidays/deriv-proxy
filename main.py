@@ -2994,7 +2994,11 @@ def setup_already_ran_to_targets(
 def trade_already_finished(structure, candles):
     """
     Replay candles after entry and detect historical TP3 or SL.
-    Returns: (finished, reason)
+
+    Checks all three TPs in sequence so partial hits are reported
+    correctly. TP3 hit closes the trade. SL hit closes the trade.
+
+    Returns: (finished: bool, reason: str)
     """
     if not structure.get("entry_epoch"):
         return False, ""
@@ -3010,7 +3014,11 @@ def trade_already_finished(structure, candles):
             structure,
             candles,
         )
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[Scanner] active_trade_plan failed "
+            f"in trade_already_finished: {exc}"
+        )
         return False, ""
 
     entry_epoch = int(structure["entry_epoch"])
@@ -3018,9 +3026,18 @@ def trade_already_finished(structure, candles):
 
     try:
         stop_loss = float(plan["stop_loss"])
+        tp1 = float(plan["tp1"])
+        tp2 = float(plan["tp2"])
         tp3 = float(plan["tp3"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as exc:
+        print(
+            f"[Scanner] Plan key error in "
+            f"trade_already_finished: {exc}"
+        )
         return False, ""
+
+    tp1_hit = False
+    tp2_hit = False
 
     for candle in candles:
         candle_epoch = int(candle["epoch"])
@@ -3032,18 +3049,32 @@ def trade_already_finished(structure, candles):
         low = float(candle["low"])
 
         if direction == "BULLISH":
+            # SL first — conservative.
             if low <= stop_loss:
                 return True, "historical_sl_already_hit"
 
+            if not tp1_hit and high >= tp1:
+                tp1_hit = True
+
+            if not tp2_hit and high >= tp2:
+                tp2_hit = True
+
             if high >= tp3:
-                return True, "historical_tp_already_hit"
+                return True, "historical_tp3_already_hit"
 
         else:
+            # BEARISH — SL first.
             if high >= stop_loss:
                 return True, "historical_sl_already_hit"
 
+            if not tp1_hit and low <= tp1:
+                tp1_hit = True
+
+            if not tp2_hit and low <= tp2:
+                tp2_hit = True
+
             if low <= tp3:
-                return True, "historical_tp_already_hit"
+                return True, "historical_tp3_already_hit"
 
     return False, ""
 
@@ -3781,13 +3812,17 @@ def send_cancel_notifications(structure, reason):
 
 def monitor_trade_alerts(pair, timeframe, candles):
     """
-    Monitor all active Telegram plans for TP1, TP2, TP3 and SL.
-
-    SL is evaluated first on each candle for conservative handling.
+    1. Process Telegram TP/SL for all rows with trade_state=ACTIVE.
+    2. Audit all ACTIVE structures that have no Telegram row and
+       close them if TP3 or SL has been hit. This ensures the
+       engine frees the slot even when no Telegram user is registered.
     """
     pair = canonical_symbol(pair)
     timeframe = str(timeframe).upper()
 
+    # ----------------------------------------------------------
+    # Step 1 — Telegram plan TP/SL processing
+    # ----------------------------------------------------------
     with DB_LOCK:
         connection = db()
 
@@ -3801,10 +3836,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 AND timeframe=%s
                 AND trade_state='ACTIVE'
                 """,
-                (
-                    pair,
-                    timeframe,
-                ),
+                (pair, timeframe),
             )
             rows = cursor.fetchall()
             cursor.close()
@@ -3816,9 +3848,6 @@ def monitor_trade_alerts(pair, timeframe, candles):
         finally:
             connection.close()
 
-    if not rows:
-        return 0
-
     total_events = 0
     closed_structure_keys = set()
 
@@ -3827,34 +3856,25 @@ def monitor_trade_alerts(pair, timeframe, candles):
             continue
 
         try:
-            plan = json.loads(
-                row["plan_json"]
-            )
+            plan = json.loads(row["plan_json"])
         except Exception:
             continue
 
-        entry_epoch = int(
-            plan.get("entry_epoch", 0)
-        )
+        entry_epoch = int(plan.get("entry_epoch", 0))
 
         if entry_epoch <= 0:
             continue
 
         direction = plan.get("direction")
 
-        if direction not in (
-            "BULLISH",
-            "BEARISH",
-        ):
+        if direction not in ("BULLISH", "BEARISH"):
             continue
 
         events = []
         close_trade = False
 
         for candle in candles:
-            candle_epoch = int(
-                candle["epoch"]
-            )
+            candle_epoch = int(candle["epoch"])
 
             if candle_epoch <= entry_epoch:
                 continue
@@ -3863,39 +3883,26 @@ def monitor_trade_alerts(pair, timeframe, candles):
             low = float(candle["low"])
 
             if direction == "BULLISH":
-                # SL first — conservative handling.
+                # SL first — conservative.
                 if (
                     not plan.get("sl_hit")
-                    and low
-                    <= float(plan["stop_loss"])
+                    and low <= float(plan["stop_loss"])
                 ):
                     plan["sl_hit"] = True
                     plan["trade_state"] = "SL_HIT"
-
                     events.append(
-                        (
-                            "SL",
-                            plan["stop_loss"],
-                            candle_epoch,
-                        )
+                        ("SL", plan["stop_loss"], candle_epoch)
                     )
-
                     close_trade = True
                     break
 
                 if (
                     not plan.get("tp1_hit")
-                    and high
-                    >= float(plan["tp1"])
+                    and high >= float(plan["tp1"])
                 ):
                     plan["tp1_hit"] = True
-
                     events.append(
-                        (
-                            "TP1",
-                            plan["tp1"],
-                            candle_epoch,
-                        )
+                        ("TP1", plan["tp1"], candle_epoch)
                     )
 
                     try:
@@ -3907,8 +3914,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                                 candle_epoch,
                             ),
                             reply_to_message_id=(
-                                row["active_message_id"]
-                                or None
+                                row["active_message_id"] or None
                             ),
                         )
                     except Exception as exc:
@@ -3919,73 +3925,46 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
                 if (
                     not plan.get("tp2_hit")
-                    and high
-                    >= float(plan["tp2"])
+                    and high >= float(plan["tp2"])
                 ):
                     plan["tp2_hit"] = True
-
                     events.append(
-                        (
-                            "TP2",
-                            plan["tp2"],
-                            candle_epoch,
-                        )
+                        ("TP2", plan["tp2"], candle_epoch)
                     )
 
                 if (
                     not plan.get("tp3_hit")
-                    and high
-                    >= float(plan["tp3"])
+                    and high >= float(plan["tp3"])
                 ):
                     plan["tp3_hit"] = True
                     plan["trade_state"] = "TP3_HIT"
-
                     events.append(
-                        (
-                            "TP3",
-                            plan["tp3"],
-                            candle_epoch,
-                        )
+                        ("TP3", plan["tp3"], candle_epoch)
                     )
-
                     close_trade = True
                     break
 
             else:
-                # BEARISH
-                # SL first — conservative handling.
+                # BEARISH — SL first.
                 if (
                     not plan.get("sl_hit")
-                    and high
-                    >= float(plan["stop_loss"])
+                    and high >= float(plan["stop_loss"])
                 ):
                     plan["sl_hit"] = True
                     plan["trade_state"] = "SL_HIT"
-
                     events.append(
-                        (
-                            "SL",
-                            plan["stop_loss"],
-                            candle_epoch,
-                        )
+                        ("SL", plan["stop_loss"], candle_epoch)
                     )
-
                     close_trade = True
                     break
 
                 if (
                     not plan.get("tp1_hit")
-                    and low
-                    <= float(plan["tp1"])
+                    and low <= float(plan["tp1"])
                 ):
                     plan["tp1_hit"] = True
-
                     events.append(
-                        (
-                            "TP1",
-                            plan["tp1"],
-                            candle_epoch,
-                        )
+                        ("TP1", plan["tp1"], candle_epoch)
                     )
 
                     try:
@@ -3997,8 +3976,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                                 candle_epoch,
                             ),
                             reply_to_message_id=(
-                                row["active_message_id"]
-                                or None
+                                row["active_message_id"] or None
                             ),
                         )
                     except Exception as exc:
@@ -4009,45 +3987,29 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
                 if (
                     not plan.get("tp2_hit")
-                    and low
-                    <= float(plan["tp2"])
+                    and low <= float(plan["tp2"])
                 ):
                     plan["tp2_hit"] = True
-
                     events.append(
-                        (
-                            "TP2",
-                            plan["tp2"],
-                            candle_epoch,
-                        )
+                        ("TP2", plan["tp2"], candle_epoch)
                     )
 
                 if (
                     not plan.get("tp3_hit")
-                    and low
-                    <= float(plan["tp3"])
+                    and low <= float(plan["tp3"])
                 ):
                     plan["tp3_hit"] = True
                     plan["trade_state"] = "TP3_HIT"
-
                     events.append(
-                        (
-                            "TP3",
-                            plan["tp3"],
-                            candle_epoch,
-                        )
+                        ("TP3", plan["tp3"], candle_epoch)
                     )
-
                     close_trade = True
                     break
 
         if not events:
             continue
 
-        active_message_id = (
-            row["active_message_id"]
-            or None
-        )
+        active_message_id = row["active_message_id"] or None
 
         for event, price, candle_epoch in events:
             ok, _message_id, detail = tg_send(
@@ -4065,8 +4027,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 total_events += 1
             else:
                 print(
-                    "[Telegram] Trade event "
-                    f"failed: {detail}"
+                    f"[Telegram] Trade event failed: {detail}"
                 )
 
         if close_trade:
@@ -4076,9 +4037,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 else "SL_HIT"
             )
 
-            closed_structure_keys.add(
-                row["structure_key"]
-            )
+            closed_structure_keys.add(row["structure_key"])
 
         with DB_LOCK:
             connection = db()
@@ -4099,10 +4058,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             plan,
                             separators=(",", ":"),
                         ),
-                        plan.get(
-                            "trade_state",
-                            "ACTIVE",
-                        ),
+                        plan.get("trade_state", "ACTIVE"),
                         events[-1][0],
                         int(time.time()),
                         row["id"],
@@ -4118,14 +4074,99 @@ def monitor_trade_alerts(pair, timeframe, candles):
             finally:
                 connection.close()
 
-    # Delete only after every Telegram user has been processed.
+    # Delete closed structures after all users are processed.
     for structure_key_value in closed_structure_keys:
-        delete_structure_by_key(
-            structure_key_value
+        try:
+            delete_structure_by_key(structure_key_value)
+        except Exception as exc:
+            print(
+                f"[Scanner] delete_structure_by_key error: {exc}"
+            )
+
+    # ----------------------------------------------------------
+    # Step 2 — Structural audit
+    #
+    # Find all ACTIVE structures for this pair/timeframe that
+    # have no Telegram row. These were never tracked by
+    # monitor_trade_alerts but still need TP/SL enforcement.
+    # Without this, structures with no registered Telegram users
+    # stay ACTIVE forever even after TP3 or SL is hit.
+    # ----------------------------------------------------------
+    active_structures = structures_for(pair, timeframe)
+
+    for structure in active_structures:
+        if structure.get("stage") != "ACTIVE":
+            continue
+
+        skey = structure_key(structure)
+
+        # Skip structures that already had Telegram processing above.
+        if skey in closed_structure_keys:
+            continue
+
+        if not structure.get("entry_epoch"):
+            continue
+
+        if not structure.get("entry_price"):
+            continue
+
+        try:
+            finished, finish_reason = trade_already_finished(
+                structure,
+                candles,
+            )
+        except Exception as exc:
+            print(
+                f"[Scanner] Structural audit "
+                f"trade_already_finished error: {exc}"
+            )
+            continue
+
+        if not finished:
+            continue
+
+        print(
+            f"[Scanner] Structural audit closing "
+            f"{pair} {timeframe}: {finish_reason}"
         )
 
-    return total_events
+        trade_state = (
+            "CLOSED"
+            if "tp" in finish_reason
+            else "SL_HIT"
+        )
 
+        try:
+            close_trade_alerts_for_structure(
+                skey,
+                trade_state,
+                finish_reason,
+            )
+        except Exception as exc:
+            print(
+                f"[Scanner] close_trade_alerts error "
+                f"in structural audit: {exc}"
+            )
+
+        mark_invalid(structure, finish_reason)
+
+        try:
+            from main import save
+            save(structure)
+        except Exception:
+            pass
+
+        try:
+            delete_structure_by_key(skey)
+        except Exception as exc:
+            print(
+                f"[Scanner] delete_structure_by_key error "
+                f"in structural audit: {exc}"
+            )
+
+        total_events += 1
+
+    return total_events
 
 # ============================================================
 # NOTIFICATION PROCESSING
@@ -4470,6 +4511,31 @@ def run_scan(
                 )
 
             if finished:
+                print(
+                    f"[Scanner] {structure.get('pair')} "
+                    f"{structure.get('timeframe')} "
+                    f"ACTIVE structure closed: {finish_reason}"
+                )
+
+                # Close the Telegram trade alert row so
+                # monitor_trade_alerts does not re-process it.
+                trade_state = (
+                    "CLOSED"
+                    if "tp" in finish_reason
+                    else "SL_HIT"
+                )
+
+                try:
+                    close_trade_alerts_for_structure(
+                        structure_key(structure),
+                        trade_state,
+                        finish_reason,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[Scanner] close_trade_alerts error: {exc}"
+                    )
+
                 mark_invalid(
                     structure,
                     finish_reason,
@@ -4502,15 +4568,9 @@ def run_scan(
             )
 
             entry_epoch = int(
-                structure.get(
-                    "entry_epoch",
-                    0,
-                )
-                or 0
+                structure.get("entry_epoch", 0) or 0
             )
 
-            # Cancel any Telegram chain that reached a live F, G,
-            # or active entry—not only structures that reached G.
             had_live_notification_stage = (
                 f_epoch > live_from
                 or g_epoch > live_from
@@ -4518,20 +4578,36 @@ def run_scan(
             )
 
             if had_live_notification_stage:
-                send_cancel_notifications(
-                    structure,
-                    reason,
+                try:
+                    send_cancel_notifications(
+                        structure,
+                        reason,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[Scanner] send_cancel_notifications "
+                        f"error: {exc}"
+                    )
+
+                try:
+                    close_trade_alerts_for_structure(
+                        structure_key(structure),
+                        "CANCELLED",
+                        reason,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[Scanner] close_trade_alerts error "
+                        f"on invalidation: {exc}"
+                    )
+
+            try:
+                delete_structure(structure)
+            except Exception as exc:
+                print(
+                    f"[Scanner] delete_structure error: {exc}"
                 )
 
-                # Also close records belonging to inactive Telegram
-                # users so no stale plan remains in the database.
-                close_trade_alerts_for_structure(
-                    structure_key(structure),
-                    "CANCELLED",
-                    reason,
-                )
-
-            delete_structure(structure)
             continue
 
         g_epoch_now = int(
