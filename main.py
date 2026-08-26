@@ -4150,11 +4150,25 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
         mark_invalid(structure, finish_reason)
 
-        try:
-            from main import save
-            save(structure)
-        except Exception:
-            pass
+        # Notify only if the plan was live, then remove the row.
+        live_from = int(
+            structure.get("live_from_epoch", 0) or 0
+        )
+        entry_epoch = int(
+            structure.get("entry_epoch", 0) or 0
+        )
+
+        if entry_epoch > live_from:
+            try:
+                send_cancel_notifications(
+                    structure,
+                    finish_reason,
+                )
+            except Exception as exc:
+                print(
+                    f"[Scanner] send_cancel_notifications "
+                    f"error in structural audit: {exc}"
+                )
 
         try:
             delete_structure_by_key(skey)
