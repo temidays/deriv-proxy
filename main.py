@@ -775,6 +775,10 @@ def set_stage(structure, stage):
     return structure
 
 
+def timeframe_seconds(timeframe):
+    """Bar duration in seconds for a structure's timeframe."""
+    return int(TIMEFRAME_MAP.get(str(timeframe).upper(), 900))
+    
 def structure_a_zone(structure, candles=None):
     """
     Bullish:
