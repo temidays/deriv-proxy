@@ -2028,29 +2028,22 @@ def advance_structure(
     fib_ratio=0.5,
 ):
     """
-    Advance one structure through:
+    Advance one structure through D -> E -> F -> G.
 
-        D -> E -> F -> G
+    F LOGIC:
+        F is the DEEPEST retracement after E, not the first touch of
+        fib50. For bullish F is the lowest swing low; for bearish it is
+        the highest swing high.
 
-    STRICT F A-zone rule:
+        The scan for F candidates stops when a pivot in the opposite
+        direction reaches the G threshold (meaning the retracement is
+        over and the trend has resumed).
 
-        BULLISH:
-            F must be strictly ABOVE the A-zone rectangle.
-            Valid only when:
-
-                F.price > a_zone_high
-
-            Invalid when F is below, inside, or touching the rectangle.
-
-        BEARISH:
-            F must be strictly BELOW the A-zone rectangle.
-            Valid only when:
-
-                F.price < a_zone_low
-
-            Invalid when F is above, inside, or touching the rectangle.
-
-    This checks the actual qualifying F pivot only.
+        F must still:
+        - reach at least fib50
+        - be strictly OUTSIDE the A-zone rectangle
+          (bullish: F > zone_high, bearish: F < zone_low)
+        - not break protected B
     """
     if structure.get("stage") in (
         "ACTIVE",
@@ -2097,32 +2090,25 @@ def advance_structure(
 
     def f_a_zone_violation_reason(f_price):
         """
-        Return empty string when F is valid.
+        Strict A-zone rule.
 
-        Bullish:
-            valid only if F > zone_high
-
-        Bearish:
-            valid only if F < zone_low
+        Bullish: valid only if F > zone_high
+        Bearish: valid only if F < zone_low
         """
         f_price = float(f_price)
 
         if direction == "BULLISH":
             if f_price < zone_low:
                 return "bullish_F_below_A_zone"
-
             if f_price <= zone_high:
                 return "bullish_F_inside_A_zone"
-
             return ""
 
         # BEARISH
         if f_price > zone_high:
             return "bearish_F_above_A_zone"
-
         if f_price >= zone_low:
             return "bearish_F_inside_A_zone"
-
         return ""
 
     # --------------------------------------------------------
@@ -2138,7 +2124,6 @@ def advance_structure(
         for kind, index, candle in pivots:
             if index <= b_index:
                 continue
-
             if kind != replacement_kind:
                 continue
 
@@ -2241,15 +2226,11 @@ def advance_structure(
         for kind, index, candle in pivots:
             if index <= d_index:
                 continue
-
             if kind != wanted_kind:
                 continue
 
             e_price = float(
-                pivot_price(
-                    kind,
-                    candle,
-                )
+                pivot_price(kind, candle)
             )
 
             expansion = (
@@ -2308,17 +2289,13 @@ def advance_structure(
     fib50 = float(structure["fib50"])
 
     # --------------------------------------------------------
-    # F = first confirmed retracement beyond Fib 50
+    # F = DEEPEST retracement after E
     #
-    # STRICT A-zone rule:
+    # Scans ALL qualifying swing lows (bullish) or swing highs
+    # (bearish) after E and picks the most extreme one.
     #
-    # Bullish:
-    #   valid only if F > zone_high
-    #
-    # Bearish:
-    #   valid only if F < zone_low
-    #
-    # F inside or touching the rectangle is invalid.
+    # The scan stops when a pivot in the opposite direction
+    # reaches the G threshold, meaning the retracement is over.
     # --------------------------------------------------------
     if structure.get("f") is None:
         wanted_kind = (
@@ -2326,19 +2303,58 @@ def advance_structure(
             if direction == "BULLISH"
             else "H"
         )
+        opposite_kind = (
+            "H"
+            if direction == "BULLISH"
+            else "L"
+        )
+
+        # Pre-compute G threshold to bound the retracement scan.
+        total_range = abs(
+            float(structure["e"]["price"]) - b_level
+        )
+
+        g_threshold = None
+
+        if total_range > 0:
+            if direction == "BULLISH":
+                g_threshold = (
+                    b_level
+                    + total_range * G_MIN_REACH
+                )
+            else:
+                g_threshold = (
+                    b_level
+                    - total_range * G_MIN_REACH
+                )
+
+        best_f_data = None
+        best_f_price = None
 
         for kind, index, candle in pivots:
             if index <= e_index:
                 continue
 
+            # Stop when the opposite direction reaches G territory.
+            if kind == opposite_kind and g_threshold is not None:
+                opp_price = float(
+                    pivot_price(kind, candle)
+                )
+
+                reaches_g = (
+                    opp_price >= g_threshold
+                    if direction == "BULLISH"
+                    else opp_price <= g_threshold
+                )
+
+                if reaches_g:
+                    break
+
             if kind != wanted_kind:
                 continue
 
             f_price = float(
-                pivot_price(
-                    kind,
-                    candle,
-                )
+                pivot_price(kind, candle)
             )
 
             reaches_fib = (
@@ -2350,8 +2366,27 @@ def advance_structure(
             if not reaches_fib:
                 continue
 
+            # Track deepest.
+            is_deeper = (
+                best_f_price is None
+                or (
+                    direction == "BULLISH"
+                    and f_price < best_f_price
+                )
+                or (
+                    direction == "BEARISH"
+                    and f_price > best_f_price
+                )
+            )
+
+            if is_deeper:
+                best_f_data = (kind, index, candle)
+                best_f_price = f_price
+
+        # Validate and assign the deepest F found.
+        if best_f_price is not None:
             zone_reason = f_a_zone_violation_reason(
-                f_price
+                best_f_price
             )
 
             if zone_reason:
@@ -2361,9 +2396,9 @@ def advance_structure(
                 )
 
             f_broke_protected_b = (
-                f_price <= b_level
+                best_f_price <= b_level
                 if direction == "BULLISH"
-                else f_price >= b_level
+                else best_f_price >= b_level
             )
 
             if f_broke_protected_b:
@@ -2372,18 +2407,19 @@ def advance_structure(
                     "F_broke_protected_B",
                 )
 
+            _kind, _index, _candle = best_f_data
+
             structure["f"] = point(
                 "F",
                 "FIB_RETRACEMENT",
-                candle,
-                f_price,
+                _candle,
+                best_f_price,
             )
 
             set_stage(
                 structure,
                 "WAITING_FOR_G",
             )
-            break
 
     if structure.get("f") is None:
         return structure
@@ -2399,7 +2435,7 @@ def advance_structure(
         )
 
     # --------------------------------------------------------
-    # Validate stored F points created before this upgrade.
+    # Validate stored F from before this upgrade.
     # --------------------------------------------------------
     stored_f_price = float(
         structure["f"]["price"]
@@ -2458,15 +2494,11 @@ def advance_structure(
         for kind, index, candle in pivots:
             if index <= f_index:
                 continue
-
             if kind != wanted_kind:
                 continue
 
             g_price = float(
-                pivot_price(
-                    kind,
-                    candle,
-                )
+                pivot_price(kind, candle)
             )
 
             reaches_g = (
