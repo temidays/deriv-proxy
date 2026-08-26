@@ -2032,18 +2032,25 @@ def advance_structure(
 
         D -> E -> F -> G
 
-    F A-zone rule:
+    STRICT F A-zone rule:
+
         BULLISH:
-            F may be above or inside the A-zone.
-            F is invalid only when F.price < a_zone_low.
+            F must be strictly ABOVE the A-zone rectangle.
+            Valid only when:
+
+                F.price > a_zone_high
+
+            Invalid when F is below, inside, or touching the rectangle.
 
         BEARISH:
-            F may be below or inside the A-zone.
-            F is invalid only when F.price > a_zone_high.
+            F must be strictly BELOW the A-zone rectangle.
+            Valid only when:
 
-    This checks the actual qualifying F pivot only. It does not scan
-    every candle after E, because doing so can invalidate a valid
-    historical F/G sequence before G is processed.
+                F.price < a_zone_low
+
+            Invalid when F is above, inside, or touching the rectangle.
+
+    This checks the actual qualifying F pivot only.
     """
     if structure.get("stage") in (
         "ACTIVE",
@@ -2088,6 +2095,36 @@ def advance_structure(
         candles,
     )
 
+    def f_a_zone_violation_reason(f_price):
+        """
+        Return empty string when F is valid.
+
+        Bullish:
+            valid only if F > zone_high
+
+        Bearish:
+            valid only if F < zone_low
+        """
+        f_price = float(f_price)
+
+        if direction == "BULLISH":
+            if f_price < zone_low:
+                return "bullish_F_below_A_zone"
+
+            if f_price <= zone_high:
+                return "bullish_F_inside_A_zone"
+
+            return ""
+
+        # BEARISH
+        if f_price > zone_high:
+            return "bearish_F_above_A_zone"
+
+        if f_price >= zone_low:
+            return "bearish_F_inside_A_zone"
+
+        return ""
+
     # --------------------------------------------------------
     # D = break of structure
     # --------------------------------------------------------
@@ -2098,8 +2135,6 @@ def advance_structure(
             else "H"
         )
 
-        # B must not be replaced by a more extreme structural pivot
-        # before the BOS is established.
         for kind, index, candle in pivots:
             if index <= b_index:
                 continue
@@ -2275,18 +2310,15 @@ def advance_structure(
     # --------------------------------------------------------
     # F = first confirmed retracement beyond Fib 50
     #
-    # New A-zone rule:
+    # STRICT A-zone rule:
     #
     # Bullish:
-    #   Valid   F >= zone_low
-    #   Invalid F <  zone_low
+    #   valid only if F > zone_high
     #
     # Bearish:
-    #   Valid   F <= zone_high
-    #   Invalid F >  zone_high
+    #   valid only if F < zone_low
     #
-    # Therefore F may be inside the rectangle or outside it in
-    # the valid direction.
+    # F inside or touching the rectangle is invalid.
     # --------------------------------------------------------
     if structure.get("f") is None:
         wanted_kind = (
@@ -2318,24 +2350,16 @@ def advance_structure(
             if not reaches_fib:
                 continue
 
-            # Check the actual F pivot against the A-zone.
-            f_broke_a_zone = (
-                f_price < zone_low
-                if direction == "BULLISH"
-                else f_price > zone_high
+            zone_reason = f_a_zone_violation_reason(
+                f_price
             )
 
-            if f_broke_a_zone:
+            if zone_reason:
                 return mark_invalid(
                     structure,
-                    (
-                        "bullish_F_below_A_zone"
-                        if direction == "BULLISH"
-                        else "bearish_F_above_A_zone"
-                    ),
+                    zone_reason,
                 )
 
-            # Keep the original protected-B validation.
             f_broke_protected_b = (
                 f_price <= b_level
                 if direction == "BULLISH"
@@ -2376,28 +2400,19 @@ def advance_structure(
 
     # --------------------------------------------------------
     # Validate stored F points created before this upgrade.
-    #
-    # This ensures an old database record containing an invalid F
-    # is discarded after deployment.
     # --------------------------------------------------------
     stored_f_price = float(
         structure["f"]["price"]
     )
 
-    stored_f_broke_zone = (
-        stored_f_price < zone_low
-        if direction == "BULLISH"
-        else stored_f_price > zone_high
+    stored_zone_reason = f_a_zone_violation_reason(
+        stored_f_price
     )
 
-    if stored_f_broke_zone:
+    if stored_zone_reason:
         return mark_invalid(
             structure,
-            (
-                "bullish_F_below_A_zone"
-                if direction == "BULLISH"
-                else "bearish_F_above_A_zone"
-            ),
+            stored_zone_reason,
         )
 
     stored_f_broke_b = (
@@ -2477,7 +2492,6 @@ def advance_structure(
             break
 
     return structure
-
 
 # ============================================================
 # TRADE PLAN CALCULATIONS
