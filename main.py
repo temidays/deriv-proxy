@@ -2774,9 +2774,17 @@ def active_trade_plan(structure, candles):
 
 def confirm_closed_entry(structure, candles):
     """
-    After G:
-    - confirm a live A-zone entry
-    - or discard the setup if history already used it
+    After G, scan for a valid A-zone entry candle.
+
+    Entry candle requirements:
+        - candle must overlap the A-zone (wick or body)
+        - candle must close in the expected direction
+          (bullish: close > open, bearish: close < open)
+
+    If no valid entry candle is found but the zone was touched
+    AND price already reached structural targets (D, E, or G),
+    the entry was missed. The structure is invalidated so the
+    engine frees the slot and scans for a new position.
     """
     if structure.get("stage") != "WAITING_FOR_ENTRY":
         return False
@@ -2788,8 +2796,11 @@ def confirm_closed_entry(structure, candles):
         structure,
         candles,
     )
+
     g_epoch = int(structure["g"]["epoch"])
-    live_from = int(structure.get("live_from_epoch", 0) or 0)
+    live_from = int(
+        structure.get("live_from_epoch", 0) or 0
+    )
     protected_b = float(structure["b"]["price"])
     direction = structure["direction"]
 
@@ -2806,8 +2817,6 @@ def confirm_closed_entry(structure, candles):
         close = float(candle["close"])
         opened = float(candle["open"])
 
-        # Wick into the zone is enough.
-        # Candle must close in the expected direction.
         if direction == "BULLISH":
             return close > opened
 
@@ -2828,6 +2837,7 @@ def confirm_closed_entry(structure, candles):
         if candle_epoch <= g_epoch:
             continue
 
+        # Protected B violated before entry → invalidate.
         if broke_protected_b(candle) and entry_candle is None:
             mark_invalid(
                 structure,
@@ -2842,7 +2852,12 @@ def confirm_closed_entry(structure, candles):
             if is_entry_candle(candle):
                 entry_candle = candle
 
+    # --------------------------------------------------------
+    # No valid entry candle found.
+    # --------------------------------------------------------
     if entry_candle is None:
+        # Zone was touched but no qualifying candle.
+        # If price already reached targets, the opportunity is gone.
         if touched_zone and setup_already_ran_to_targets(
             structure,
             candles,
@@ -2856,11 +2871,21 @@ def confirm_closed_entry(structure, candles):
             )
             return False
 
+        # Zone not touched yet, or targets not reached.
+        # Keep waiting.
         return False
 
-    structure["entry_price"] = float(entry_candle["close"])
-    structure["entry_epoch"] = int(entry_candle["epoch"])
+    # --------------------------------------------------------
+    # Valid entry candle found.
+    # --------------------------------------------------------
+    structure["entry_price"] = float(
+        entry_candle["close"]
+    )
+    structure["entry_epoch"] = int(
+        entry_candle["epoch"]
+    )
 
+    # Check if the trade already finished historically.
     finished = False
     finish_reason = ""
 
@@ -2886,6 +2911,7 @@ def confirm_closed_entry(structure, candles):
         structure,
         "ACTIVE",
     )
+
     return True
 
     
@@ -2897,10 +2923,14 @@ def setup_already_ran_to_targets(
     zone_high,
 ):
     """
-    Price touched the A-zone after G, then already reached
-    a target without producing a valid entry candle.
+    After G, if the zone was touched but no valid entry candle
+    formed, check whether price already reached the nearest
+    structural target (D, E, or G). If so, the entry was missed
+    and the slot should be freed.
     """
     direction = structure["direction"]
+
+    # Collect targets beyond the zone.
     targets = []
 
     for key in ("d", "e", "g"):
@@ -2920,6 +2950,7 @@ def setup_already_ran_to_targets(
     if not targets:
         return False
 
+    # Use the nearest target (easiest to reach).
     target = (
         min(targets)
         if direction == "BULLISH"
@@ -2959,7 +2990,6 @@ def setup_already_ran_to_targets(
             return True
 
     return False
-
 
 def trade_already_finished(structure, candles):
     """
