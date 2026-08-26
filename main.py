@@ -2027,6 +2027,24 @@ def advance_structure(
     min_atr_move=0.25,
     fib_ratio=0.5,
 ):
+    """
+    Advance one structure through:
+
+        D -> E -> F -> G
+
+    F A-zone rule:
+        BULLISH:
+            F may be above or inside the A-zone.
+            F is invalid only when F.price < a_zone_low.
+
+        BEARISH:
+            F may be below or inside the A-zone.
+            F is invalid only when F.price > a_zone_high.
+
+    This checks the actual qualifying F pivot only. It does not scan
+    every candle after E, because doing so can invalidate a valid
+    historical F/G sequence before G is processed.
+    """
     if structure.get("stage") in (
         "ACTIVE",
         "CLOSED",
@@ -2048,11 +2066,13 @@ def advance_structure(
     )
 
     direction = structure["direction"]
-    b_epoch = structure["b"]["epoch"]
-    c_epoch = structure["c"]["epoch"]
 
-    b_index = index_by_epoch.get(int(b_epoch))
-    c_index = index_by_epoch.get(int(c_epoch))
+    b_index = index_by_epoch.get(
+        int(structure["b"]["epoch"])
+    )
+    c_index = index_by_epoch.get(
+        int(structure["c"]["epoch"])
+    )
 
     if b_index is None or c_index is None:
         return mark_invalid(
@@ -2063,10 +2083,13 @@ def advance_structure(
     b_level = float(structure["b"]["price"])
     c_level = float(structure["c"]["price"])
 
-    zone_low, zone_high = structure_a_zone(structure, candles)
+    zone_low, zone_high = structure_a_zone(
+        structure,
+        candles,
+    )
 
     # --------------------------------------------------------
-    # D = BOS
+    # D = break of structure
     # --------------------------------------------------------
     if structure.get("d") is None:
         replacement_kind = (
@@ -2075,6 +2098,8 @@ def advance_structure(
             else "H"
         )
 
+        # B must not be replaced by a more extreme structural pivot
+        # before the BOS is established.
         for kind, index, candle in pivots:
             if index <= b_index:
                 continue
@@ -2138,7 +2163,7 @@ def advance_structure(
         return structure
 
     d_index = index_by_epoch.get(
-        structure["d"]["epoch"]
+        int(structure["d"]["epoch"])
     )
 
     if d_index is None:
@@ -2148,7 +2173,7 @@ def advance_structure(
         )
 
     # --------------------------------------------------------
-    # Protected B validation
+    # Protected-B validation
     # --------------------------------------------------------
     for index in range(
         b_index + 1,
@@ -2157,9 +2182,9 @@ def advance_structure(
         candle = candles[index]
 
         broke_b = (
-            candle["low"] <= b_level
+            float(candle["low"]) <= b_level
             if direction == "BULLISH"
-            else candle["high"] >= b_level
+            else float(candle["high"]) >= b_level
         )
 
         if broke_b:
@@ -2169,7 +2194,7 @@ def advance_structure(
             )
 
     # --------------------------------------------------------
-    # E = expansion
+    # E = post-BOS expansion
     # --------------------------------------------------------
     if structure.get("e") is None:
         wanted_kind = (
@@ -2185,9 +2210,11 @@ def advance_structure(
             if kind != wanted_kind:
                 continue
 
-            e_price = pivot_price(
-                kind,
-                candle,
+            e_price = float(
+                pivot_price(
+                    kind,
+                    candle,
+                )
             )
 
             expansion = (
@@ -2234,7 +2261,7 @@ def advance_structure(
         return structure
 
     e_index = index_by_epoch.get(
-        structure["e"]["epoch"]
+        int(structure["e"]["epoch"])
     )
 
     if e_index is None:
@@ -2243,33 +2270,23 @@ def advance_structure(
             "E_missing_from_candle_window",
         )
 
-    fib50 = structure["fib50"]
-
-    # --------------------------------------------------------
-    # NEW: A-Zone Continuous Protection (Post-E to Pre-G)
-    # F must NEVER break the A-zone rectangle. If any candle
-    # pierces the A-zone before G forms, instantly discard.
-    # --------------------------------------------------------
-    if structure.get("g") is None:
-        for index in range(
-            e_index + 1,
-            len(candles),
-        ):
-            candle = candles[index]
-            broke_a_zone = (
-                candle["low"] < zone_low
-                if direction == "BULLISH"
-                else candle["high"] > zone_high
-            )
-
-            if broke_a_zone:
-                return mark_invalid(
-                    structure,
-                    "F_broke_A_zone",
-                )
+    fib50 = float(structure["fib50"])
 
     # --------------------------------------------------------
     # F = first confirmed retracement beyond Fib 50
+    #
+    # New A-zone rule:
+    #
+    # Bullish:
+    #   Valid   F >= zone_low
+    #   Invalid F <  zone_low
+    #
+    # Bearish:
+    #   Valid   F <= zone_high
+    #   Invalid F >  zone_high
+    #
+    # Therefore F may be inside the rectangle or outside it in
+    # the valid direction.
     # --------------------------------------------------------
     if structure.get("f") is None:
         wanted_kind = (
@@ -2285,9 +2302,11 @@ def advance_structure(
             if kind != wanted_kind:
                 continue
 
-            f_price = pivot_price(
-                kind,
-                candle,
+            f_price = float(
+                pivot_price(
+                    kind,
+                    candle,
+                )
             )
 
             reaches_fib = (
@@ -2298,6 +2317,36 @@ def advance_structure(
 
             if not reaches_fib:
                 continue
+
+            # Check the actual F pivot against the A-zone.
+            f_broke_a_zone = (
+                f_price < zone_low
+                if direction == "BULLISH"
+                else f_price > zone_high
+            )
+
+            if f_broke_a_zone:
+                return mark_invalid(
+                    structure,
+                    (
+                        "bullish_F_below_A_zone"
+                        if direction == "BULLISH"
+                        else "bearish_F_above_A_zone"
+                    ),
+                )
+
+            # Keep the original protected-B validation.
+            f_broke_protected_b = (
+                f_price <= b_level
+                if direction == "BULLISH"
+                else f_price >= b_level
+            )
+
+            if f_broke_protected_b:
+                return mark_invalid(
+                    structure,
+                    "F_broke_protected_B",
+                )
 
             structure["f"] = point(
                 "F",
@@ -2316,7 +2365,7 @@ def advance_structure(
         return structure
 
     f_index = index_by_epoch.get(
-        structure["f"]["epoch"]
+        int(structure["f"]["epoch"])
     )
 
     if f_index is None:
@@ -2326,12 +2375,50 @@ def advance_structure(
         )
 
     # --------------------------------------------------------
+    # Validate stored F points created before this upgrade.
+    #
+    # This ensures an old database record containing an invalid F
+    # is discarded after deployment.
+    # --------------------------------------------------------
+    stored_f_price = float(
+        structure["f"]["price"]
+    )
+
+    stored_f_broke_zone = (
+        stored_f_price < zone_low
+        if direction == "BULLISH"
+        else stored_f_price > zone_high
+    )
+
+    if stored_f_broke_zone:
+        return mark_invalid(
+            structure,
+            (
+                "bullish_F_below_A_zone"
+                if direction == "BULLISH"
+                else "bearish_F_above_A_zone"
+            ),
+        )
+
+    stored_f_broke_b = (
+        stored_f_price <= b_level
+        if direction == "BULLISH"
+        else stored_f_price >= b_level
+    )
+
+    if stored_f_broke_b:
+        return mark_invalid(
+            structure,
+            "F_broke_protected_B",
+        )
+
+    # --------------------------------------------------------
     # G = strength push near or beyond 100%
     # --------------------------------------------------------
     if structure.get("g") is None:
         total_range = abs(
-            structure["e"]["price"]
-            - structure["b"]["price"]
+            float(structure["e"]["price"])
+            - b_level
         )
 
         if total_range <= 0:
@@ -2342,13 +2429,13 @@ def advance_structure(
 
         if direction == "BULLISH":
             g_threshold = (
-                structure["b"]["price"]
+                b_level
                 + total_range * G_MIN_REACH
             )
             wanted_kind = "H"
         else:
             g_threshold = (
-                structure["b"]["price"]
+                b_level
                 - total_range * G_MIN_REACH
             )
             wanted_kind = "L"
@@ -2360,9 +2447,11 @@ def advance_structure(
             if kind != wanted_kind:
                 continue
 
-            g_price = pivot_price(
-                kind,
-                candle,
+            g_price = float(
+                pivot_price(
+                    kind,
+                    candle,
+                )
             )
 
             reaches_g = (
@@ -3615,11 +3704,17 @@ def send_cancel_notifications(structure, reason):
 # ============================================================
 
 def monitor_trade_alerts(pair, timeframe, candles):
+    """
+    Monitor all active Telegram plans for TP1, TP2, TP3 and SL.
+
+    SL is evaluated first on each candle for conservative handling.
+    """
     pair = canonical_symbol(pair)
     timeframe = str(timeframe).upper()
 
     with DB_LOCK:
         connection = db()
+
         try:
             cursor = connection.cursor()
             cursor.execute(
@@ -3627,46 +3722,63 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 SELECT *
                 FROM telegram_trade_alerts
                 WHERE pair=%s
-                  AND timeframe=%s
-                  AND trade_state='ACTIVE'
+                AND timeframe=%s
+                AND trade_state='ACTIVE'
                 """,
                 (
                     pair,
                     timeframe,
                 ),
             )
-            result_rows = cursor.fetchall()
             rows = cursor.fetchall()
             cursor.close()
-            cursor.close()
-            return result_rows
+
+        except Exception:
+            connection.rollback()
+            raise
+
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     if not rows:
         return 0
 
     total_events = 0
+    closed_structure_keys = set()
 
     for row in rows:
         if not row["plan_json"]:
             continue
 
         try:
-            plan = json.loads(row["plan_json"])
+            plan = json.loads(
+                row["plan_json"]
+            )
         except Exception:
             continue
 
-        entry_epoch = int(plan.get("entry_epoch", 0))
-        direction = plan["direction"]
+        entry_epoch = int(
+            plan.get("entry_epoch", 0)
+        )
+
+        if entry_epoch <= 0:
+            continue
+
+        direction = plan.get("direction")
+
+        if direction not in (
+            "BULLISH",
+            "BEARISH",
+        ):
+            continue
+
         events = []
         close_trade = False
 
         for candle in candles:
-            candle_epoch = int(candle["epoch"])
+            candle_epoch = int(
+                candle["epoch"]
+            )
 
             if candle_epoch <= entry_epoch:
                 continue
@@ -3675,13 +3787,15 @@ def monitor_trade_alerts(pair, timeframe, candles):
             low = float(candle["low"])
 
             if direction == "BULLISH":
-                # SL first — conservative
+                # SL first — conservative handling.
                 if (
                     not plan.get("sl_hit")
-                    and low <= float(plan["stop_loss"])
+                    and low
+                    <= float(plan["stop_loss"])
                 ):
                     plan["sl_hit"] = True
                     plan["trade_state"] = "SL_HIT"
+
                     events.append(
                         (
                             "SL",
@@ -3689,14 +3803,17 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
+
                     close_trade = True
                     break
 
                 if (
                     not plan.get("tp1_hit")
-                    and high >= float(plan["tp1"])
+                    and high
+                    >= float(plan["tp1"])
                 ):
                     plan["tp1_hit"] = True
+
                     events.append(
                         (
                             "TP1",
@@ -3704,7 +3821,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
-                    # Break-even suggestion
+
                     try:
                         tg_send(
                             row["chat_id"],
@@ -3713,18 +3830,24 @@ def monitor_trade_alerts(pair, timeframe, candles):
                                 plan["tp1"],
                                 candle_epoch,
                             ),
-                            reply_to_message_id=row["active_message_id"],
+                            reply_to_message_id=(
+                                row["active_message_id"]
+                                or None
+                            ),
                         )
                     except Exception as exc:
                         print(
-                            f"[Telegram] Break-even message failed: {exc}"
+                            "[Telegram] Break-even "
+                            f"message failed: {exc}"
                         )
 
                 if (
                     not plan.get("tp2_hit")
-                    and high >= float(plan["tp2"])
+                    and high
+                    >= float(plan["tp2"])
                 ):
                     plan["tp2_hit"] = True
+
                     events.append(
                         (
                             "TP2",
@@ -3735,10 +3858,12 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
                 if (
                     not plan.get("tp3_hit")
-                    and high >= float(plan["tp3"])
+                    and high
+                    >= float(plan["tp3"])
                 ):
                     plan["tp3_hit"] = True
                     plan["trade_state"] = "TP3_HIT"
+
                     events.append(
                         (
                             "TP3",
@@ -3746,18 +3871,21 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
+
                     close_trade = True
                     break
 
             else:
                 # BEARISH
-                # SL first — conservative
+                # SL first — conservative handling.
                 if (
                     not plan.get("sl_hit")
-                    and high >= float(plan["stop_loss"])
+                    and high
+                    >= float(plan["stop_loss"])
                 ):
                     plan["sl_hit"] = True
                     plan["trade_state"] = "SL_HIT"
+
                     events.append(
                         (
                             "SL",
@@ -3765,14 +3893,17 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
+
                     close_trade = True
                     break
 
                 if (
                     not plan.get("tp1_hit")
-                    and low <= float(plan["tp1"])
+                    and low
+                    <= float(plan["tp1"])
                 ):
                     plan["tp1_hit"] = True
+
                     events.append(
                         (
                             "TP1",
@@ -3780,7 +3911,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
-                    # Break-even suggestion
+
                     try:
                         tg_send(
                             row["chat_id"],
@@ -3789,18 +3920,24 @@ def monitor_trade_alerts(pair, timeframe, candles):
                                 plan["tp1"],
                                 candle_epoch,
                             ),
-                            reply_to_message_id=row["active_message_id"],
+                            reply_to_message_id=(
+                                row["active_message_id"]
+                                or None
+                            ),
                         )
                     except Exception as exc:
                         print(
-                            f"[Telegram] Break-even message failed: {exc}"
+                            "[Telegram] Break-even "
+                            f"message failed: {exc}"
                         )
 
                 if (
                     not plan.get("tp2_hit")
-                    and low <= float(plan["tp2"])
+                    and low
+                    <= float(plan["tp2"])
                 ):
                     plan["tp2_hit"] = True
+
                     events.append(
                         (
                             "TP2",
@@ -3811,10 +3948,12 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
                 if (
                     not plan.get("tp3_hit")
-                    and low <= float(plan["tp3"])
+                    and low
+                    <= float(plan["tp3"])
                 ):
                     plan["tp3_hit"] = True
                     plan["trade_state"] = "TP3_HIT"
+
                     events.append(
                         (
                             "TP3",
@@ -3822,13 +3961,17 @@ def monitor_trade_alerts(pair, timeframe, candles):
                             candle_epoch,
                         )
                     )
+
                     close_trade = True
                     break
 
         if not events:
             continue
 
-        active_message_id = row["active_message_id"]
+        active_message_id = (
+            row["active_message_id"]
+            or None
+        )
 
         for event, price, candle_epoch in events:
             ok, _message_id, detail = tg_send(
@@ -3846,7 +3989,8 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 total_events += 1
             else:
                 print(
-                    f"[Telegram] Trade event failed: {detail}"
+                    "[Telegram] Trade event "
+                    f"failed: {detail}"
                 )
 
         if close_trade:
@@ -3856,40 +4000,53 @@ def monitor_trade_alerts(pair, timeframe, candles):
                 else "SL_HIT"
             )
 
-            with DB_LOCK:
-                connection = db()
-                try:
-                    cursor = connection.cursor()
-                    cursor.execute(
-                        """
-                        UPDATE telegram_trade_alerts
-                        SET plan_json=%s,
-                            trade_state=%s,
-                            last_event=%s,
-                            updated_epoch=%s
-                        WHERE id=%s
-                        """,
-                        (
-                            json.dumps(
-                                plan,
-                                separators=(",", ":"),
-                            ),
-                            plan["trade_state"],
-                            events[-1][0],
-                            int(time.time()),
-                            row["id"],
-                        ),
-                    )
-                    connection.commit()
-                    cursor.close()
-                except Exception:
-                    connection.rollback()
-                    raise
-                finally:
-                    connection.close()
+            closed_structure_keys.add(
+                row["structure_key"]
+            )
 
-            # Free this pattern slot
-            delete_structure_by_key(row["structure_key"])
+        with DB_LOCK:
+            connection = db()
+
+            try:
+                cursor = connection.cursor()
+                cursor.execute(
+                    """
+                    UPDATE telegram_trade_alerts
+                    SET plan_json=%s,
+                        trade_state=%s,
+                        last_event=%s,
+                        updated_epoch=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        json.dumps(
+                            plan,
+                            separators=(",", ":"),
+                        ),
+                        plan.get(
+                            "trade_state",
+                            "ACTIVE",
+                        ),
+                        events[-1][0],
+                        int(time.time()),
+                        row["id"],
+                    ),
+                )
+                connection.commit()
+                cursor.close()
+
+            except Exception:
+                connection.rollback()
+                raise
+
+            finally:
+                connection.close()
+
+    # Delete only after every Telegram user has been processed.
+    for structure_key_value in closed_structure_keys:
+        delete_structure_by_key(
+            structure_key_value
+        )
 
     return total_events
 
@@ -3968,21 +4125,35 @@ def process_structure_events(
     previous_g_epoch,
     candles,
 ):
+    """
+    Process F, G and active-entry notifications.
+
+    Important:
+    G confluence is checked again on later scans when it was not
+    available on the original G-confirmation scan. Telegram database
+    records prevent duplicate delivery.
+    """
     notifications = 0
 
     live_from = int(
-        structure.get("live_from_epoch", 0)
+        structure.get("live_from_epoch", 0) or 0
     )
 
-    f_epoch = int(
-        structure["f"]["epoch"]
-    ) if structure.get("f") else 0
+    f_epoch = (
+        int(structure["f"]["epoch"])
+        if structure.get("f")
+        else 0
+    )
 
-    g_epoch = int(
-        structure["g"]["epoch"]
-    ) if structure.get("g") else 0
+    g_epoch = (
+        int(structure["g"]["epoch"])
+        if structure.get("g")
+        else 0
+    )
 
-    # F message only when F is newly live.
+    # --------------------------------------------------------
+    # F notification
+    # --------------------------------------------------------
     if (
         structure.get("stage") in (
             "WAITING_FOR_G",
@@ -3996,46 +4167,57 @@ def process_structure_events(
             structure
         )
 
-    # G message contains Entry Zone + SL.
-    # Only send if confluence is confirmed on another timeframe
-    # (or if confluence check is disabled).
+    # --------------------------------------------------------
+    # G notification
+    #
+    # Do not require g_epoch != previous_g_epoch here.
+    # If confluence was missing when G first formed, this block
+    # must retry on subsequent scans.
+    # --------------------------------------------------------
     if (
         structure.get("stage") in (
             "WAITING_FOR_ENTRY",
             "ACTIVE",
         )
         and g_epoch > live_from
-        and g_epoch != previous_g_epoch
     ):
         confluent = True
         confluent_tf = None
         confluent_stage = None
 
         if REQUIRE_CONFLUENCE:
-            confluent, confluent_tf, confluent_stage = (
-                check_timeframe_confluence(
-                    structure["pair"],
-                    structure["timeframe"],
-                    structure["direction"],
-                    min_stage_rank=CONFLUENCE_MIN_RANK,
-                )
+            (
+                confluent,
+                confluent_tf,
+                confluent_stage,
+            ) = check_timeframe_confluence(
+                structure["pair"],
+                structure["timeframe"],
+                structure["direction"],
+                min_stage_rank=CONFLUENCE_MIN_RANK,
             )
 
         if confluent:
-            if confluent_tf:
+            sent_now = send_g_notifications(
+                structure,
+                candles,
+                confluent_tf=confluent_tf,
+                confluent_stage=confluent_stage,
+            )
+
+            notifications += sent_now
+
+            if sent_now and confluent_tf:
                 print(
                     f"[Confluence] {structure['pair']} "
                     f"{structure['timeframe']} "
                     f"{structure['direction']} confirmed by "
                     f"{confluent_tf} at {confluent_stage}"
                 )
-            notifications += send_g_notifications(
-                structure,
-                candles,
-                confluent_tf=confluent_tf,
-                confluent_stage=confluent_stage,
-            )
-        else:
+
+        elif g_epoch != previous_g_epoch:
+            # Print only on initial G formation. The confluence
+            # check still retries silently on future scans.
             print(
                 f"[Confluence] {structure['pair']} "
                 f"{structure['timeframe']} "
@@ -4044,11 +4226,15 @@ def process_structure_events(
                 f"holding Telegram alert"
             )
 
-    # If an entry was confirmed by a closed A-zone rejection,
-    # send actual Entry + TP1/TP2/TP3.
+    # --------------------------------------------------------
+    # Active entry notification
+    #
+    # This remains retry-safe because send_active_notifications()
+    # checks active_message_id before sending.
+    # --------------------------------------------------------
     if (
         structure.get("stage") == "ACTIVE"
-        and structure.get("entry_epoch", 0) > live_from
+        and int(structure.get("entry_epoch", 0)) > live_from
     ):
         notifications += send_active_notifications(
             structure,
@@ -4214,19 +4400,61 @@ def run_scan(
                 )
                 
         if structure["state"] == "INVALID":
-            # Send cancellation only for a live plan.
-            if (
-                structure.get("g")
-                and structure.get("g", {}).get("epoch", 0)
-                > structure.get("live_from_epoch", 0)
-            ):
+            reason = structure.get(
+                "discard_reason",
+                "structure invalidated",
+            )
+
+            live_from = int(
+                structure.get(
+                    "live_from_epoch",
+                    0,
+                )
+                or 0
+            )
+
+            f_epoch = (
+                int(structure["f"]["epoch"])
+                if structure.get("f")
+                else 0
+            )
+
+            g_epoch = (
+                int(structure["g"]["epoch"])
+                if structure.get("g")
+                else 0
+            )
+
+            entry_epoch = int(
+                structure.get(
+                    "entry_epoch",
+                    0,
+                )
+                or 0
+            )
+
+            # Cancel any Telegram chain that reached a live F, G,
+            # or active entry—not only structures that reached G.
+            had_live_notification_stage = (
+                f_epoch > live_from
+                or g_epoch > live_from
+                or entry_epoch > live_from
+            )
+
+            if had_live_notification_stage:
                 send_cancel_notifications(
                     structure,
-                    structure.get(
-                        "discard_reason",
-                        "structure invalidated",
-                    ),
+                    reason,
                 )
+
+                # Also close records belonging to inactive Telegram
+                # users so no stale plan remains in the database.
+                close_trade_alerts_for_structure(
+                    structure_key(structure),
+                    "CANCELLED",
+                    reason,
+                )
+
             delete_structure(structure)
             continue
 
