@@ -2035,7 +2035,7 @@ def advance_structure(
         return structure
 
     index_by_epoch = {
-        candle["epoch"]: index
+        int(candle["epoch"]): index
         for index, candle in enumerate(candles)
     }
 
@@ -2048,14 +2048,11 @@ def advance_structure(
     )
 
     direction = structure["direction"]
+    b_epoch = structure["b"]["epoch"]
+    c_epoch = structure["c"]["epoch"]
 
-    b_index = index_by_epoch.get(
-        structure["b"]["epoch"]
-    )
-
-    c_index = index_by_epoch.get(
-        structure["c"]["epoch"]
-    )
+    b_index = index_by_epoch.get(int(b_epoch))
+    c_index = index_by_epoch.get(int(c_epoch))
 
     if b_index is None or c_index is None:
         return mark_invalid(
@@ -2063,13 +2060,14 @@ def advance_structure(
             "pivot_missing_from_candle_window",
         )
 
-    b_level = structure["b"]["price"]
-    c_level = structure["c"]["price"]
+    b_level = float(structure["b"]["price"])
+    c_level = float(structure["c"]["price"])
+
+    zone_low, zone_high = structure_a_zone(structure, candles)
 
     # --------------------------------------------------------
     # D = BOS
     # --------------------------------------------------------
-
     if structure.get("d") is None:
         replacement_kind = (
             "L"
@@ -2134,7 +2132,6 @@ def advance_structure(
                     structure,
                     "WAITING_FOR_E",
                 )
-
                 break
 
     if structure.get("d") is None:
@@ -2153,7 +2150,6 @@ def advance_structure(
     # --------------------------------------------------------
     # Protected B validation
     # --------------------------------------------------------
-
     for index in range(
         b_index + 1,
         len(candles),
@@ -2175,7 +2171,6 @@ def advance_structure(
     # --------------------------------------------------------
     # E = expansion
     # --------------------------------------------------------
-
     if structure.get("e") is None:
         wanted_kind = (
             "H"
@@ -2212,8 +2207,7 @@ def advance_structure(
             if (
                 local_atr
                 and expansion
-                < local_atr
-                * float(expansion_atr)
+                < local_atr * float(expansion_atr)
             ):
                 continue
 
@@ -2234,7 +2228,6 @@ def advance_structure(
                 structure,
                 "WAITING_FOR_F",
             )
-
             break
 
     if structure.get("e") is None:
@@ -2253,12 +2246,31 @@ def advance_structure(
     fib50 = structure["fib50"]
 
     # --------------------------------------------------------
-    # F = first confirmed retracement beyond Fib 50
-    #
-    # F does not need to touch A-zone.
-    # It must remain above B for bullish or below B for bearish.
+    # NEW: A-Zone Continuous Protection (Post-E to Pre-G)
+    # F must NEVER break the A-zone rectangle. If any candle
+    # pierces the A-zone before G forms, instantly discard.
     # --------------------------------------------------------
+    if structure.get("g") is None:
+        for index in range(
+            e_index + 1,
+            len(candles),
+        ):
+            candle = candles[index]
+            broke_a_zone = (
+                candle["low"] < zone_low
+                if direction == "BULLISH"
+                else candle["high"] > zone_high
+            )
 
+            if broke_a_zone:
+                return mark_invalid(
+                    structure,
+                    "F_broke_A_zone",
+                )
+
+    # --------------------------------------------------------
+    # F = first confirmed retracement beyond Fib 50
+    # --------------------------------------------------------
     if structure.get("f") is None:
         wanted_kind = (
             "L"
@@ -2287,18 +2299,6 @@ def advance_structure(
             if not reaches_fib:
                 continue
 
-            breaks_protected_b = (
-                f_price <= b_level
-                if direction == "BULLISH"
-                else f_price >= b_level
-            )
-
-            if breaks_protected_b:
-                return mark_invalid(
-                    structure,
-                    "F_broke_protected_B",
-                )
-
             structure["f"] = point(
                 "F",
                 "FIB_RETRACEMENT",
@@ -2310,7 +2310,6 @@ def advance_structure(
                 structure,
                 "WAITING_FOR_G",
             )
-
             break
 
     if structure.get("f") is None:
@@ -2382,12 +2381,10 @@ def advance_structure(
                 g_price,
             )
 
-            # G is confirmed. Now wait for a closed A-zone entry.
             set_stage(
                 structure,
                 "WAITING_FOR_ENTRY",
             )
-
             break
 
     return structure
