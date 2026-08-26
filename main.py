@@ -112,6 +112,43 @@ A_ZONE_ATR_BUFFER = max(
     ),
 )
 
+# ------------------------------------------------------------------
+# A-ZONE RECTANGLE (Pine parity)
+#
+# Pine:
+#   box.new(
+#       f_bi(s.a.k),            <- left   = the A candle
+#       s.zHigh,                <- top
+#       bar_index + extendBars, <- right  = live bar projected forward
+#       s.zLow                  <- bottom
+#   )
+#
+# extendBars = input.int(25, "Extend lines (bars)")
+# ------------------------------------------------------------------
+A_ZONE_EXTEND_BARS = max(
+    1,
+    int(
+        os.environ.get(
+            "A_ZONE_EXTEND_BARS",
+            "25",
+        )
+    ),
+)
+
+# Pine's `bar_index` is the LIVE (still forming) bar.
+# main.py works on CLOSED candles only, so the last closed candle is
+# one bar behind Pine's bar_index. Setting this True adds that bar back
+# so the rectangle's right edge lands on the identical chart timestamp.
+A_ZONE_ANCHOR_LIVE_BAR = os.environ.get(
+    "A_ZONE_ANCHOR_LIVE_BAR",
+    "true",
+).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 
 TIMEFRAME_MAP = {
     "M1": 60,
@@ -598,6 +635,9 @@ def create_schema(connection):
             fib50 REAL,
             a_zone_low REAL,
             a_zone_high REAL,
+            a_zone_left_epoch INTEGER DEFAULT 0,
+            a_zone_right_epoch INTEGER DEFAULT 0,
+            a_zone_anchor_epoch INTEGER DEFAULT 0,
             entry_price REAL,
             entry_epoch INTEGER DEFAULT 0,
             valid INTEGER DEFAULT 0,
@@ -655,6 +695,25 @@ def create_schema(connection):
         )
         """
     )
+
+    # ------------------------------------------------------------------
+    # Migration: add A-zone rectangle geometry to existing databases
+    # ------------------------------------------------------------------
+    for column_name, column_type in (
+        ("a_zone_left_epoch", "INTEGER DEFAULT 0"),
+        ("a_zone_right_epoch", "INTEGER DEFAULT 0"),
+        ("a_zone_anchor_epoch", "INTEGER DEFAULT 0"),
+    ):
+        try:
+            cursor.execute(
+                "ALTER TABLE structures "
+                "ADD COLUMN IF NOT EXISTS "
+                f"{column_name} {column_type}"
+            )
+        except Exception as exc:
+            print(
+                f"[DB] Migration skipped for {column_name}: {exc}"
+            )
 
     cursor.execute(
         """
@@ -775,20 +834,47 @@ def set_stage(structure, stage):
     return structure
 
 
+# ============================================================
+# A-ZONE  (port of Pine f_zone + box.new)
+# ============================================================
+
 def timeframe_seconds(timeframe):
-    """Bar duration in seconds for a structure's timeframe."""
-    return int(TIMEFRAME_MAP.get(str(timeframe).upper(), 900))
-    
-def structure_a_zone(structure, candles=None):
-    """
-    Bullish:
-        A low to A candle body high
+    """Bar duration in seconds. Pine's implicit bar width."""
+    return int(
+        TIMEFRAME_MAP.get(
+            str(timeframe).upper(),
+            900,
+        )
+    )
 
-    Bearish:
-        A candle body low to A high
-    """
 
-    if structure.get("a_zone_low") is not None:
+def structure_a_zone(structure, candles=None, recompute=False):
+    """
+    Exact port of Pine:
+
+        f_zone(Str s) =>
+            float bodyLo = math.min(s.a.o, s.a.c)
+            float bodyHi = math.max(s.a.o, s.a.c)
+            float zl = s.dir == "BULLISH" ? s.a.l  : bodyLo
+            float zh = s.dir == "BULLISH" ? bodyHi : s.a.h
+            if aZoneBuf > 0
+                float la = array.get(aW, s.a.k)
+                if la > 0
+                    if s.dir == "BULLISH"
+                        zl := zl - la * aZoneBuf
+                    else
+                        zh := zh + la * aZoneBuf
+            s.zLow  := zl
+            s.zHigh := zh
+
+    Bullish:  A candle low        -> A candle body high
+    Bearish:  A candle body low   -> A candle high
+    """
+    if (
+        not recompute
+        and structure.get("a_zone_low") is not None
+        and structure.get("a_zone_high") is not None
+    ):
         return (
             float(structure["a_zone_low"]),
             float(structure["a_zone_high"]),
@@ -798,6 +884,7 @@ def structure_a_zone(structure, candles=None):
 
     candle_low = float(a["low"])
     candle_high = float(a["high"])
+
     candle_body_low = min(
         float(a["open"]),
         float(a["close"]),
@@ -814,7 +901,7 @@ def structure_a_zone(structure, candles=None):
         zone_low = candle_body_low
         zone_high = candle_high
 
-    # Optional ATR zone buffer.
+    # Optional ATR zone buffer (one-sided, exactly like Pine).
     if candles and A_ZONE_ATR_BUFFER > 0:
         index = None
 
@@ -841,14 +928,99 @@ def structure_a_zone(structure, candles=None):
     )
 
 
-def apply_zone_to_structure(structure, candles=None):
+def structure_a_zone_box(structure, candles=None):
+    """
+    Exact port of the Pine rectangle:
+
+        if showZone and not na(s.a)
+            box.new(
+                f_bi(s.a.k),            // left   = A candle bar
+                s.zHigh,                // top
+                bar_index + extendBars, // right  = live bar + N bars
+                s.zLow                  // bottom
+            )
+
+    The box is anchored on the A candle and projected forward past the
+    most recent bar. Pine redraws it on every `barstate.islast`, so the
+    right edge slides forward with the market. This function reproduces
+    that: pass `candles` and the projection re-anchors to the latest bar.
+
+    Returns a chart-ready rectangle dict.
+    """
     zone_low, zone_high = structure_a_zone(
         structure,
         candles,
     )
 
-    structure["a_zone_low"] = zone_low
-    structure["a_zone_high"] = zone_high
+    step = timeframe_seconds(structure["timeframe"])
+    left_epoch = int(structure["a"]["epoch"])
+
+    # Pine's `bar_index` = right-most bar on the chart.
+    if candles:
+        anchor_epoch = int(candles[-1]["epoch"])
+    elif structure.get("a_zone_anchor_epoch"):
+        anchor_epoch = int(structure["a_zone_anchor_epoch"])
+    else:
+        anchor_epoch = left_epoch
+
+    # Pine counts the live bar; we only hold closed bars.
+    forward_bars = A_ZONE_EXTEND_BARS + (
+        1 if A_ZONE_ANCHOR_LIVE_BAR else 0
+    )
+
+    right_epoch = anchor_epoch + forward_bars * step
+
+    # A rectangle must always open to the right of A.
+    if right_epoch <= left_epoch:
+        right_epoch = left_epoch + forward_bars * step
+
+    return {
+        "left_epoch": left_epoch,
+        "right_epoch": right_epoch,
+        "anchor_epoch": anchor_epoch,
+        "top": float(zone_high),
+        "bottom": float(zone_low),
+        "height": float(zone_high - zone_low),
+        "bars_wide": int(
+            (right_epoch - left_epoch) // step
+        ),
+        "extend_bars": A_ZONE_EXTEND_BARS,
+        "bar_seconds": step,
+        "left_time_utc": epoch_to_local(left_epoch),
+        "right_time_utc": epoch_to_local(right_epoch),
+        "anchor_time_utc": epoch_to_local(anchor_epoch),
+        "direction": structure["direction"],
+        "pair": structure.get("pair"),
+        "timeframe": structure["timeframe"],
+    }
+
+
+def apply_zone_to_structure(structure, candles=None):
+    """
+    Writes both the price band and the rectangle geometry onto the
+    structure.
+
+    Pine calls f_zone(s) once when the candidate is created, then
+    redraws the box every bar with a fresh right edge. This mirrors
+    both behaviours:
+
+      * zLow / zHigh are computed once and then cached (frozen)
+      * left_epoch is permanently the A candle
+      * right_epoch advances whenever fresh candles are supplied
+      * with no candles, the last stored projection is reused
+        (so save() never collapses the box)
+    """
+    box = structure_a_zone_box(
+        structure,
+        candles,
+    )
+
+    structure["a_zone_low"] = box["bottom"]
+    structure["a_zone_high"] = box["top"]
+    structure["a_zone_left_epoch"] = box["left_epoch"]
+    structure["a_zone_right_epoch"] = box["right_epoch"]
+    structure["a_zone_anchor_epoch"] = box["anchor_epoch"]
+    structure["a_zone"] = box
 
     return structure
 
@@ -882,6 +1054,15 @@ def structure_to_row_values(structure):
         "fib50": structure.get("fib50"),
         "a_zone_low": structure.get("a_zone_low"),
         "a_zone_high": structure.get("a_zone_high"),
+        "a_zone_left_epoch": int(
+            structure.get("a_zone_left_epoch", 0) or 0
+        ),
+        "a_zone_right_epoch": int(
+            structure.get("a_zone_right_epoch", 0) or 0
+        ),
+        "a_zone_anchor_epoch": int(
+            structure.get("a_zone_anchor_epoch", 0) or 0
+        ),
         "entry_price": structure.get("entry_price"),
         "entry_epoch": int(
             structure.get("entry_epoch", 0)
@@ -937,6 +1118,9 @@ def save(structure):
                     fib50,
                     a_zone_low,
                     a_zone_high,
+                    a_zone_left_epoch,
+                    a_zone_right_epoch,
+                    a_zone_anchor_epoch,
                     entry_price,
                     entry_epoch,
                     valid,
@@ -964,6 +1148,9 @@ def save(structure):
                     %(fib50)s,
                     %(a_zone_low)s,
                     %(a_zone_high)s,
+                    %(a_zone_left_epoch)s,
+                    %(a_zone_right_epoch)s,
+                    %(a_zone_anchor_epoch)s,
                     %(entry_price)s,
                     %(entry_epoch)s,
                     %(valid)s,
@@ -987,6 +1174,9 @@ def save(structure):
                     fib50=excluded.fib50,
                     a_zone_low=excluded.a_zone_low,
                     a_zone_high=excluded.a_zone_high,
+                    a_zone_left_epoch=excluded.a_zone_left_epoch,
+                    a_zone_right_epoch=excluded.a_zone_right_epoch,
+                    a_zone_anchor_epoch=excluded.a_zone_anchor_epoch,
                     entry_price=excluded.entry_price,
                     entry_epoch=excluded.entry_epoch,
                     valid=excluded.valid,
@@ -1010,11 +1200,7 @@ def save(structure):
             raise
 
         finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
-
+            connection.close()
 
 def parse_json_point(row, column):
     value = row[column]
@@ -1027,12 +1213,9 @@ def parse_json_point(row, column):
 
 def row_to_structure(row):
     try:
-        stage = row.get("stage") or row.get("state") or ""
+        stage = row["stage"] or row["state"]
     except Exception:
-        try:
-            stage = row["state"]
-        except Exception:
-            return None
+        stage = row["state"]
 
     structure = {
         "id": row["id"],
@@ -1053,6 +1236,15 @@ def row_to_structure(row):
         "fib50": row["fib50"],
         "a_zone_low": row["a_zone_low"],
         "a_zone_high": row["a_zone_high"],
+        "a_zone_left_epoch": int(
+            row.get("a_zone_left_epoch") or 0
+        ),
+        "a_zone_right_epoch": int(
+            row.get("a_zone_right_epoch") or 0
+        ),
+        "a_zone_anchor_epoch": int(
+            row.get("a_zone_anchor_epoch") or 0
+        ),
         "entry_price": row["entry_price"],
         "entry_epoch": int(row["entry_epoch"] or 0),
         "valid": bool(row["valid"]),
@@ -1072,6 +1264,20 @@ def row_to_structure(row):
         }
     else:
         structure["fib"] = None
+
+    # Rebuild the drawable A-zone rectangle from stored geometry.
+    if (
+        structure.get("a")
+        and structure.get("a_zone_low") is not None
+    ):
+        try:
+            structure["a_zone"] = structure_a_zone_box(
+                structure
+            )
+        except Exception:
+            structure["a_zone"] = None
+    else:
+        structure["a_zone"] = None
 
     return structure
 
@@ -2224,10 +2430,13 @@ def sl_buffer_for(structure, candles):
 
 
 def pending_trade_plan(structure, candles):
-    zone_low, zone_high = structure_a_zone(
+    box = structure_a_zone_box(
         structure,
         candles,
     )
+
+    zone_low = box["bottom"]
+    zone_high = box["top"]
 
     buffer = sl_buffer_for(
         structure,
@@ -2247,6 +2456,9 @@ def pending_trade_plan(structure, candles):
         "status": "WAITING_FOR_PULLBACK",
         "entry_zone_low": round(zone_low, 5),
         "entry_zone_high": round(zone_high, 5),
+        "a_zone_box": box,
+        "entry_zone_from_utc": box["left_time_utc"],
+        "entry_zone_to_utc": box["right_time_utc"],
         "stop_loss": round(stop_loss, 5),
         "protected_B": round(
             structure["b"]["price"],
@@ -2269,10 +2481,13 @@ def active_trade_plan(structure, candles):
         structure["entry_price"]
     )
 
-    zone_low, zone_high = structure_a_zone(
+    box = structure_a_zone_box(
         structure,
         candles,
     )
+
+    zone_low = box["bottom"]
+    zone_high = box["top"]
 
     buffer = sl_buffer_for(
         structure,
@@ -2305,18 +2520,15 @@ def active_trade_plan(structure, candles):
             for item in candidates
             if item[1] > entry
         ]
-
         valid_targets.sort(
             key=lambda item: item[1]
         )
-
     else:
         valid_targets = [
             item
             for item in candidates
             if item[1] < entry
         ]
-
         valid_targets.sort(
             key=lambda item: item[1],
             reverse=True,
@@ -2375,13 +2587,11 @@ def active_trade_plan(structure, candles):
         if risk > 0
         else 0.0
     )
-
     rr2 = (
         abs(tp2 - entry) / risk
         if risk > 0
         else 0.0
     )
-
     rr3 = (
         abs(tp3 - entry) / risk
         if risk > 0
@@ -2396,6 +2606,9 @@ def active_trade_plan(structure, candles):
         "status": "ACTIVE",
         "entry_zone_low": round(zone_low, 5),
         "entry_zone_high": round(zone_high, 5),
+        "a_zone_box": box,
+        "entry_zone_from_utc": box["left_time_utc"],
+        "entry_zone_to_utc": box["right_time_utc"],
         "entry": round(entry, 5),
         "stop_loss": round(stop_loss, 5),
         "protected_B": round(
@@ -2730,6 +2943,8 @@ def g_message_text(structure, candles, confluent_tf=None, confluent_stage=None):
         candles,
     )
 
+    box = plan["a_zone_box"]
+
     icon = (
         "🟢"
         if structure["direction"] == "BULLISH"
@@ -2755,7 +2970,15 @@ def g_message_text(structure, candles, confluent_tf=None, confluent_stage=None):
             "",
             confluence_line,
             "",
-            f"Entry Zone: <b>{plan['entry_zone_low']} - {plan['entry_zone_high']}</b>",
+            "──────── PROJECTED A-ZONE ────────",
+            f"Top: <b>{plan['entry_zone_high']}</b>",
+            f"Bottom: <b>{plan['entry_zone_low']}</b>",
+            f"Anchored at A: <b>{box['left_time_utc']}</b>",
+            f"Projected to: <b>{box['right_time_utc']}</b>",
+            f"Width: <b>{box['bars_wide']} bars</b> "
+            f"(+{box['extend_bars']} forward)",
+            "──────────────────────────────",
+            "",
             f"Stop Loss: <b>{plan['stop_loss']}</b>",
             f"Protected B: <b>{plan['protected_B']}</b>",
             "",
@@ -5331,7 +5554,105 @@ def structures_api():
         ]
     )
 
+@app.get("/structures/zones")
+def structure_zones_api():
+    """
+    Returns every live A-zone rectangle, ready to draw.
 
+    Each item mirrors Pine:
+        box.new(left_epoch, top, right_epoch, bottom)
+    """
+    raw_pair = request.args.get("pair", "")
+    raw_timeframe = request.args.get("timeframe", "")
+
+    pairs = unique_values(
+        [
+            canonical_symbol(item)
+            for item in split_csv(raw_pair)
+            if canonical_symbol(item)
+        ]
+    )
+
+    timeframes = unique_values(
+        [
+            item.upper()
+            for item in split_csv(raw_timeframe)
+            if item.upper() in TIMEFRAME_MAP
+        ]
+    )
+
+    sql = (
+        "SELECT * FROM structures "
+        "WHERE state NOT IN ('INVALID', 'CLOSED')"
+    )
+
+    arguments = []
+    clauses = []
+
+    if pairs:
+        clauses.append(
+            "pair IN ("
+            + ",".join("%s" for _ in pairs)
+            + ")"
+        )
+        arguments.extend(pairs)
+
+    if timeframes:
+        clauses.append(
+            "timeframe IN ("
+            + ",".join("%s" for _ in timeframes)
+            + ")"
+        )
+        arguments.extend(timeframes)
+
+    if clauses:
+        sql += " AND " + " AND ".join(clauses)
+
+    sql += " ORDER BY updated_epoch DESC LIMIT 500"
+
+    with DB_LOCK:
+        connection = db()
+
+        try:
+            cursor = connection.cursor()
+            cursor.execute(sql, arguments)
+            rows = cursor.fetchall()
+            cursor.close()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    zones = []
+
+    for row in rows:
+        structure = row_to_structure(row)
+        box = structure.get("a_zone")
+
+        if not box:
+            continue
+
+        zones.append(
+            {
+                "structure_key": structure["structure_key"],
+                "pair": structure["pair"],
+                "timeframe": structure["timeframe"],
+                "direction": structure["direction"],
+                "stage": structure["stage"],
+                "box": box,
+            }
+        )
+
+    return jsonify(
+        {
+            "ok": True,
+            "count": len(zones),
+            "extend_bars": A_ZONE_EXTEND_BARS,
+            "zones": zones,
+        }
+    )
+    
 @app.post("/structures/close")
 def close_structure_api():
     if not strict_admin_authorized():
