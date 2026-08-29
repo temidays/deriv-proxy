@@ -101,6 +101,23 @@ TRADE_TP3_EXTENSION = max(
     ),
 )
 
+# ── FINAL TP SELECTION ───────────────────────────────────────
+# Which TP level closes the trade and frees the slot.
+#
+# Valid values: "tp1", "tp2", "tp3"
+#
+# Historically the engine treated TP3 as the "final" target.
+# The new default treats TP2 as the final target — the same price
+# as the original structural "E-level" target before the TP3
+# extension was added.
+FINAL_TP_KEY = os.environ.get(
+    "FINAL_TP_KEY",
+    "tp2",
+).lower()
+
+if FINAL_TP_KEY not in ("tp1", "tp2", "tp3"):
+    FINAL_TP_KEY = "tp2"
+
 # A-zone uses A candle low/body for bullish and body/high for bearish.
 # Optional ATR expansion around the zone.
 A_ZONE_ATR_BUFFER = max(
@@ -3360,10 +3377,11 @@ def setup_already_ran_to_targets(
 
 def trade_already_finished(structure, candles):
     """
-    Replay candles after entry and detect historical TP3 or SL.
+    Replay candles after entry and detect historical SL or final TP.
 
-    Checks all three TPs in sequence so partial hits are reported
-    correctly. TP3 hit closes the trade. SL hit closes the trade.
+    The final TP is controlled by FINAL_TP_KEY.
+    Default: "tp2" — matches the original structural E-target,
+    before the TP3 extension was added.
 
     Returns: (finished: bool, reason: str)
     """
@@ -3393,18 +3411,13 @@ def trade_already_finished(structure, candles):
 
     try:
         stop_loss = float(plan["stop_loss"])
-        tp1 = float(plan["tp1"])
-        tp2 = float(plan["tp2"])
-        tp3 = float(plan["tp3"])
+        final_tp = float(plan[FINAL_TP_KEY])
     except (KeyError, TypeError, ValueError) as exc:
         print(
             f"[Scanner] Plan key error in "
             f"trade_already_finished: {exc}"
         )
         return False, ""
-
-    tp1_hit = False
-    tp2_hit = False
 
     for candle in candles:
         candle_epoch = int(candle["epoch"])
@@ -3420,28 +3433,15 @@ def trade_already_finished(structure, candles):
             if low <= stop_loss:
                 return True, "historical_sl_already_hit"
 
-            if not tp1_hit and high >= tp1:
-                tp1_hit = True
-
-            if not tp2_hit and high >= tp2:
-                tp2_hit = True
-
-            if high >= tp3:
-                return True, "historical_tp3_already_hit"
+            if high >= final_tp:
+                return True, f"historical_{FINAL_TP_KEY}_already_hit"
 
         else:
-            # BEARISH — SL first.
             if high >= stop_loss:
                 return True, "historical_sl_already_hit"
 
-            if not tp1_hit and low <= tp1:
-                tp1_hit = True
-
-            if not tp2_hit and low <= tp2:
-                tp2_hit = True
-
-            if low <= tp3:
-                return True, "historical_tp3_already_hit"
+            if low <= final_tp:
+                return True, f"historical_{FINAL_TP_KEY}_already_hit"
 
     return False, ""
 
@@ -4299,12 +4299,24 @@ def monitor_trade_alerts(pair, timeframe, candles):
                         ("TP2", plan["tp2"], candle_epoch)
                     )
 
+                # Final TP (configurable — default is tp2).
                 if (
-                    not plan.get("tp3_hit")
-                    and high >= float(plan["tp3"])
+                    not plan.get(f"{FINAL_TP_KEY}_hit")
+                    and high >= float(plan[FINAL_TP_KEY])
                 ):
-                    plan["tp3_hit"] = True
-                    plan["trade_state"] = "TP3_HIT"
+                    plan[f"{FINAL_TP_KEY}_hit"] = True
+                    plan["trade_state"] = "TP_HIT"
+
+                    events.append(
+                        (
+                            FINAL_TP_KEY.upper(),
+                            plan[FINAL_TP_KEY],
+                            candle_epoch,
+                        )
+                    )
+
+                    close_trade = True
+                    break
                     events.append(
                         ("TP3", plan["tp3"], candle_epoch)
                     )
@@ -4361,12 +4373,24 @@ def monitor_trade_alerts(pair, timeframe, candles):
                         ("TP2", plan["tp2"], candle_epoch)
                     )
 
+                # Final TP (configurable — default is tp2).
                 if (
-                    not plan.get("tp3_hit")
-                    and low <= float(plan["tp3"])
+                    not plan.get(f"{FINAL_TP_KEY}_hit")
+                    and low <= float(plan[FINAL_TP_KEY])
                 ):
-                    plan["tp3_hit"] = True
-                    plan["trade_state"] = "TP3_HIT"
+                    plan[f"{FINAL_TP_KEY}_hit"] = True
+                    plan["trade_state"] = "TP_HIT"
+
+                    events.append(
+                        (
+                            FINAL_TP_KEY.upper(),
+                            plan[FINAL_TP_KEY],
+                            candle_epoch,
+                        )
+                    )
+
+                    close_trade = True
+                    break
                     events.append(
                         ("TP3", plan["tp3"], candle_epoch)
                     )
@@ -4400,7 +4424,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
         if close_trade:
             plan["trade_state"] = (
                 "CLOSED"
-                if plan.get("tp3_hit")
+                if plan.get(f"{FINAL_TP_KEY}_hit")
                 else "SL_HIT"
             )
 
@@ -4499,7 +4523,7 @@ def monitor_trade_alerts(pair, timeframe, candles):
 
         trade_state = (
             "CLOSED"
-            if "tp" in finish_reason
+            if "tp" in finish_reason.lower()
             else "SL_HIT"
         )
 
