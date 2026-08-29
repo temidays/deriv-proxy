@@ -65,8 +65,9 @@ DEFAULT_CANDLE_COUNT = 1000
 MAX_STRUCTURES_PER_DIRECTION = int(
     os.environ.get("MAX_STRUCTURES_PER_DIRECTION", "3")
 )
-# G must reach at least this percentage of the B -> E range.
-# 0.90 means 90%, while touching or exceeding E is stronger.
+# G must reach 100% of the B -> E range, or go beyond it.
+# 1.00 = G must touch E.
+# Values above 1.00 require G to extend past E.
 G_MIN_REACH = max(
     0.50,
     min(
@@ -74,7 +75,7 @@ G_MIN_REACH = max(
         float(
             os.environ.get(
                 "SCANNER_G_MIN_REACH",
-                "0.90",
+                "1.00",
             )
         ),
     ),
@@ -2847,7 +2848,18 @@ def advance_structure(
         )
 
     # --------------------------------------------------------
-    # G = strength push after F
+    # G = strength push at or beyond 100% of B -> E
+    #
+    # Fib mapping:
+    #   0%   = B
+    #   50%  = F threshold
+    #   100% = E
+    #
+    # Bullish:
+    #   valid only if G >= E
+    #
+    # Bearish:
+    #   valid only if G <= E
     # --------------------------------------------------------
     if structure.get("g") is None:
         total_range = abs(
@@ -2860,6 +2872,8 @@ def advance_structure(
                 structure,
                 "invalid_B_E_range",
             )
+
+        e_price = float(structure["e"]["price"])
 
         if direction == "BULLISH":
             g_threshold = (
@@ -2888,6 +2902,7 @@ def advance_structure(
                 )
             )
 
+            # 100% and above.
             reaches_g = (
                 g_price >= g_threshold
                 if direction == "BULLISH"
