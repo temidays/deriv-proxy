@@ -101,6 +101,18 @@ TRADE_TP3_EXTENSION = max(
     ),
 )
 
+# Risk:Reward multiple.
+# 2.0 means 1:2 — TP is twice the SL distance from entry.
+TRADE_RR_MULTIPLIER = max(
+    0.1,
+    float(
+        os.environ.get(
+            "TRADE_RR_MULTIPLIER",
+            "2.0",
+        )
+    ),
+)
+
 # ── FINAL TP SELECTION ───────────────────────────────────────
 # Which TP level closes the trade and frees the slot.
 #
@@ -3028,126 +3040,51 @@ def pending_trade_plan(structure, candles):
 
 
 def active_trade_plan(structure, candles):
-    entry = float(
-        structure["entry_price"]
-    )
+    """
+    SL: current method (protected B +/- ATR buffer).
 
-    box = structure_a_zone_box(
-        structure,
-        candles,
-    )
+    TP: fixed risk:reward from that SL.
 
+        Risk = |entry - SL|
+        TP1  = 1R
+        TP2  = TRADE_RR_MULTIPLIER R   (default 2R, the final target)
+        TP3  = 3R                      (kept for display only)
+    """
+    entry = float(structure["entry_price"])
+
+    box = structure_a_zone_box(structure, candles)
     zone_low = box["bottom"]
     zone_high = box["top"]
 
-    buffer = sl_buffer_for(
-        structure,
-        candles,
-    )
+    buffer = sl_buffer_for(structure, candles)
 
     if structure["direction"] == "BULLISH":
         stop_loss = structure["b"]["price"] - buffer
     else:
         stop_loss = structure["b"]["price"] + buffer
 
-    candidates = [
-        (
-            "D",
-            float(structure["d"]["price"]),
-        ),
-        (
-            "E",
-            float(structure["e"]["price"]),
-        ),
-        (
-            "G",
-            float(structure["g"]["price"]),
-        ),
-    ]
-
-    if structure["direction"] == "BULLISH":
-        valid_targets = [
-            item
-            for item in candidates
-            if item[1] > entry
-        ]
-        valid_targets.sort(
-            key=lambda item: item[1]
-        )
-    else:
-        valid_targets = [
-            item
-            for item in candidates
-            if item[1] < entry
-        ]
-        valid_targets.sort(
-            key=lambda item: item[1],
-            reverse=True,
-        )
-
-    target_prices = []
-
-    for name, price in valid_targets:
-        if not target_prices:
-            target_prices.append(price)
-            continue
-
-        if abs(price - target_prices[-1]) > 0.000001:
-            target_prices.append(price)
-
-    range_be = abs(
-        structure["e"]["price"]
-        - structure["b"]["price"]
-    )
-
-    if not target_prices:
-        if structure["direction"] == "BULLISH":
-            target_prices = [
-                entry + range_be * 0.5,
-                entry + range_be,
-            ]
-        else:
-            target_prices = [
-                entry - range_be * 0.5,
-                entry - range_be,
-            ]
-
-    tp1 = target_prices[0]
-
-    if len(target_prices) >= 2:
-        tp2 = target_prices[1]
-    else:
-        if structure["direction"] == "BULLISH":
-            tp2 = tp1 + range_be * 0.5
-        else:
-            tp2 = tp1 - range_be * 0.5
-
-    if structure["direction"] == "BULLISH":
-        tp3 = tp2 + (
-            range_be * TRADE_TP3_EXTENSION
-        )
-    else:
-        tp3 = tp2 - (
-            range_be * TRADE_TP3_EXTENSION
-        )
-
     risk = abs(entry - stop_loss)
 
-    rr1 = (
-        abs(tp1 - entry) / risk
-        if risk > 0
-        else 0.0
-    )
-    rr2 = (
-        abs(tp2 - entry) / risk
-        if risk > 0
-        else 0.0
-    )
-    rr3 = (
-        abs(tp3 - entry) / risk
-        if risk > 0
-        else 0.0
-    )
+    if risk <= 0:
+        risk = abs(
+            structure["e"]["price"]
+            - structure["b"]["price"]
+        ) * 0.05
+
+    rr = TRADE_RR_MULTIPLIER
+
+    if structure["direction"] == "BULLISH":
+        tp1 = entry + risk * 1.0
+        tp2 = entry + risk * rr
+        tp3 = entry + risk * 3.0
+    else:
+        tp1 = entry - risk * 1.0
+        tp2 = entry - risk * rr
+        tp3 = entry - risk * 3.0
+
+    rr1 = 1.0 if risk > 0 else 0.0
+    rr2 = rr if risk > 0 else 0.0
+    rr3 = 3.0 if risk > 0 else 0.0
 
     return {
         "structure_key": structure_key(structure),
@@ -3162,22 +3099,15 @@ def active_trade_plan(structure, candles):
         "entry_zone_to_utc": box["right_time_utc"],
         "entry": round(entry, 5),
         "stop_loss": round(stop_loss, 5),
-        "protected_B": round(
-            structure["b"]["price"],
-            5,
-        ),
+        "protected_B": round(structure["b"]["price"], 5),
         "tp1": round(tp1, 5),
         "tp2": round(tp2, 5),
         "tp3": round(tp3, 5),
         "rr_tp1": round(rr1, 2),
         "rr_tp2": round(rr2, 2),
         "rr_tp3": round(rr3, 2),
-        "entry_epoch": int(
-            structure["entry_epoch"]
-        ),
-        "entry_time_utc": epoch_to_local(
-            structure["entry_epoch"]
-        ),
+        "entry_epoch": int(structure["entry_epoch"]),
+        "entry_time_utc": epoch_to_local(structure["entry_epoch"]),
         "created_utc": now_utc_string(),
         "tp1_hit": False,
         "tp2_hit": False,
