@@ -3279,7 +3279,7 @@ def confirm_closed_entry(structure, candles):
 
     structure["entry_price"] = float(entry_candle["close"])
     structure["entry_epoch"] = int(entry_candle["epoch"])
-    )
+    
 
     # Check if the trade already finished historically.
     finished = False
