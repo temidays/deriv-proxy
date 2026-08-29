@@ -3161,17 +3161,13 @@ def active_trade_plan(structure, candles):
 
 def confirm_closed_entry(structure, candles):
     """
-    After G, scan for a valid A-zone entry candle.
+    After G, activate the trade on the first A-zone tap.
 
-    Entry candle requirements:
-        - candle must overlap the A-zone (wick or body)
-        - candle must close in the expected direction
-          (bullish: close > open, bearish: close < open)
-
-    If no valid entry candle is found but the zone was touched
-    AND price already reached structural targets (D, E, or G),
-    the entry was missed. The structure is invalidated so the
-    engine frees the slot and scans for a new position.
+    ENTRY RULE:
+        - Candle after G must overlap the A-zone.
+        - Entry price is anchored DIRECTLY on the rectangle edge:
+            * BULLISH: Top edge of A-zone (zone_high)
+            * BEARISH: Bottom edge of A-zone (zone_low)
     """
     if structure.get("stage") != "WAITING_FOR_ENTRY":
         return False
@@ -3185,9 +3181,7 @@ def confirm_closed_entry(structure, candles):
     )
 
     g_epoch = int(structure["g"]["epoch"])
-    live_from = int(
-        structure.get("live_from_epoch", 0) or 0
-    )
+    live_from = int(structure.get("live_from_epoch", 0) or 0)
     protected_b = float(structure["b"]["price"])
     direction = structure["direction"]
 
@@ -3197,26 +3191,12 @@ def confirm_closed_entry(structure, candles):
             and float(candle["high"]) >= zone_low
         )
 
-    def is_entry_candle(candle):
-        if not touches_zone(candle):
-            return False
-
-        close = float(candle["close"])
-        opened = float(candle["open"])
-
-        if direction == "BULLISH":
-            return close > opened
-
-        return close < opened
-
     def broke_protected_b(candle):
         if direction == "BULLISH":
             return float(candle["low"]) <= protected_b
-
         return float(candle["high"]) >= protected_b
 
     entry_candle = None
-    touched_zone = False
 
     for candle in candles:
         candle_epoch = int(candle["epoch"])
@@ -3224,28 +3204,21 @@ def confirm_closed_entry(structure, candles):
         if candle_epoch <= g_epoch:
             continue
 
-        # Protected B violated before entry → invalidate.
-        if broke_protected_b(candle) and entry_candle is None:
+        # Protected B broken before entry tap -> invalidate
+        if entry_candle is None and broke_protected_b(candle):
             mark_invalid(
                 structure,
                 "protected_B_broken_before_entry",
             )
             return False
 
-        if entry_candle is None:
-            if touches_zone(candle):
-                touched_zone = True
+        if entry_candle is None and touches_zone(candle):
+            entry_candle = candle
+            break
 
-            if is_entry_candle(candle):
-                entry_candle = candle
-
-    # --------------------------------------------------------
-    # No valid entry candle found.
-    # --------------------------------------------------------
+    # No tap yet
     if entry_candle is None:
-        # Zone was touched but no qualifying candle.
-        # If price already reached targets, the opportunity is gone.
-        if touched_zone and setup_already_ran_to_targets(
+        if setup_already_ran_to_targets(
             structure,
             candles,
             g_epoch,
@@ -3258,30 +3231,17 @@ def confirm_closed_entry(structure, candles):
             )
             return False
 
-        # Zone not touched yet, or targets not reached.
-        # Keep waiting.
         return False
 
     # --------------------------------------------------------
-    # Zone tapped → run quality filters before activating
+    # Zone tapped -> set entry directly ON the rectangle edge
     # --------------------------------------------------------
-    passes, quality_reason = trade_quality_check(
-        structure,
-        candles,
+    structure["entry_price"] = float(
+        zone_high if direction == "BULLISH" else zone_low
     )
-
-    if not passes:
-        mark_invalid(
-            structure,
-            quality_reason,
-        )
-        return False
-
-    structure["entry_price"] = float(entry_candle["close"])
     structure["entry_epoch"] = int(entry_candle["epoch"])
-    
 
-    # Check if the trade already finished historically.
+    # If this trade already hit SL or TP3 historically, clean it up
     finished = False
     finish_reason = ""
 
@@ -3303,11 +3263,7 @@ def confirm_closed_entry(structure, candles):
         )
         return False
 
-    set_stage(
-        structure,
-        "ACTIVE",
-    )
-
+    set_stage(structure, "ACTIVE")
     return True
 
     
