@@ -130,6 +130,24 @@ FINAL_TP_KEY = os.environ.get(
 if FINAL_TP_KEY not in ("tp1", "tp2", "tp3"):
     FINAL_TP_KEY = "tp2"
 
+# V9.2 lifecycle parity: TP1 or SL releases the active scanner slot.
+# TP2 and TP3 remain in the plan as extended reference objectives.
+RELEASE_AT_TP1 = os.environ.get(
+    "RELEASE_AT_TP1",
+    "true",
+).lower() in ("1", "true", "yes", "on")
+RELEASE_TARGET_KEY = "tp1" if RELEASE_AT_TP1 else FINAL_TP_KEY
+
+# V9.2 prior/full-swing settings used in API and Telegram plan payloads.
+PRIOR_SWING_STRENGTH = max(
+    1, int(os.environ.get("PRIOR_SWING_STRENGTH", "3"))
+)
+PRIOR_SWING_TAKEN_BY = os.environ.get(
+    "PRIOR_SWING_TAKEN_BY", "close"
+).strip().lower()
+if PRIOR_SWING_TAKEN_BY not in ("close", "wick"):
+    PRIOR_SWING_TAKEN_BY = "close"
+
 # A-zone uses A candle low/body for bullish and body/high for bearish.
 # Optional ATR expansion around the zone.
 A_ZONE_ATR_BUFFER = max(
@@ -2763,6 +2781,112 @@ def advance_structure(
     return structure
 
 # ============================================================
+# V9.2 PRIOR TARGET SWING AND ACTUAL FULL SWING
+# ============================================================
+def _is_local_high(candles, index, strength):
+    if index < strength or index > len(candles) - 1 - strength:
+        return False
+    value = float(candles[index]["high"])
+    left = candles[index - strength:index]
+    right = candles[index + 1:index + strength + 1]
+    return (
+        all(value > float(item["high"]) for item in left)
+        and all(value >= float(item["high"]) for item in right)
+    )
+
+def _is_local_low(candles, index, strength):
+    if index < strength or index > len(candles) - 1 - strength:
+        return False
+    value = float(candles[index]["low"])
+    left = candles[index - strength:index]
+    right = candles[index + 1:index + strength + 1]
+    return (
+        all(value < float(item["low"]) for item in left)
+        and all(value <= float(item["low"]) for item in right)
+    )
+
+def prior_target_swing(structure, candles):
+    """V9.2 parity: locate the latest opposite swing before A immediately."""
+    result = {
+        "type": None, "price": None, "epoch": 0,
+        "status": "NOT_FOUND", "taken": False,
+    }
+    if not candles or not structure.get("a"):
+        return result
+    a_index = find_candle_index(candles, structure["a"]["epoch"])
+    if a_index is None:
+        return result
+    bullish = structure["direction"] == "BULLISH"
+    strength = PRIOR_SWING_STRENGTH
+    last_index = min(a_index - 1, len(candles) - 1 - strength)
+    swing_index = None
+    for index in range(last_index, strength - 1, -1):
+        found = (
+            _is_local_high(candles, index, strength)
+            if bullish else _is_local_low(candles, index, strength)
+        )
+        if found:
+            swing_index = index
+            break
+    if swing_index is None:
+        return result
+    price = float(
+        candles[swing_index]["high"] if bullish
+        else candles[swing_index]["low"]
+    )
+    start_epoch = int(
+        structure.get("g", {}).get("epoch", structure["a"]["epoch"])
+    )
+    taken = False
+    for candle in candles:
+        if int(candle["epoch"]) <= start_epoch:
+            continue
+        tested = (
+            float(candle["high"] if bullish else candle["low"])
+            if PRIOR_SWING_TAKEN_BY == "wick"
+            else float(candle["close"])
+        )
+        if (bullish and tested > price) or ((not bullish) and tested < price):
+            taken = True
+            break
+    return {
+        "type": (
+            "PRIOR_BEARISH_SWING_HIGH" if bullish
+            else "PRIOR_BULLISH_SWING_LOW"
+        ),
+        "price": price,
+        "epoch": int(candles[swing_index]["epoch"]),
+        "status": "TAKEN" if taken else "INTACT",
+        "taken": taken,
+    }
+
+def actual_full_swing(structure, candles):
+    """Protected B plus furthest post-G expansion, frozen at rectangle touch."""
+    if not candles or not structure.get("b") or not structure.get("g"):
+        return None
+    g_index = find_candle_index(candles, structure["g"]["epoch"])
+    if g_index is None:
+        return None
+    entry_index = find_candle_index(candles, structure.get("entry_epoch", 0))
+    end_index = entry_index if entry_index is not None else len(candles) - 1
+    if end_index < g_index:
+        end_index = g_index
+    bullish = structure["direction"] == "BULLISH"
+    protected_b = float(structure["b"]["price"])
+    if bullish:
+        swing_low = protected_b
+        swing_high = max(float(c["high"]) for c in candles[g_index:end_index + 1])
+    else:
+        swing_high = protected_b
+        swing_low = min(float(c["low"]) for c in candles[g_index:end_index + 1])
+    return {
+        "high": swing_high, "low": swing_low,
+        "left_epoch": int(structure["a"]["epoch"]),
+        "right_epoch": int(candles[end_index]["epoch"]),
+        "frozen_at_entry": entry_index is not None,
+    }
+
+# ============================================================
 # TRADE PLAN CALCULATIONS
 # ============================================================
 
@@ -2817,12 +2941,17 @@ def pending_trade_plan(structure, candles):
     else:
         stop_loss = structure["b"]["price"] + buffer
 
+    prior_swing = prior_target_swing(structure, candles)
+    full_swing = actual_full_swing(structure, candles)
     return {
         "structure_key": structure_key(structure),
         "pair": structure["pair"],
         "timeframe": structure["timeframe"],
         "direction": structure["direction"],
         "status": "WAITING_FOR_PULLBACK",
+        "prior_target_swing": prior_swing,
+        "actual_full_swing": full_swing,
+        "release_target": RELEASE_TARGET_KEY.upper(),
         "entry_zone_low": round(zone_low, 5),
         "entry_zone_high": round(zone_high, 5),
         "a_zone_box": box,
@@ -2892,12 +3021,17 @@ def active_trade_plan(structure, candles):
     rr2 = rr if risk > 0 else 0.0
     rr3 = 3.0 if risk > 0 else 0.0
 
+    prior_swing = prior_target_swing(structure, candles)
+    full_swing = actual_full_swing(structure, candles)
     return {
         "structure_key": structure_key(structure),
         "pair": structure["pair"],
         "timeframe": structure["timeframe"],
         "direction": structure["direction"],
         "status": "ACTIVE",
+        "release_target": RELEASE_TARGET_KEY.upper(),
+        "prior_target_swing": prior_swing,
+        "actual_full_swing": full_swing,
         "entry_zone_low": round(zone_low, 5),
         "entry_zone_high": round(zone_high, 5),
         "a_zone_box": box,
@@ -3147,7 +3281,7 @@ def trade_already_finished(structure, candles):
 
     try:
         stop_loss = float(plan["stop_loss"])
-        final_tp = float(plan[FINAL_TP_KEY])
+        release_tp = float(plan[RELEASE_TARGET_KEY])
     except (KeyError, TypeError, ValueError) as exc:
         print(
             f"[Scanner] Plan key error in "
@@ -3169,15 +3303,15 @@ def trade_already_finished(structure, candles):
             if low <= stop_loss:
                 return True, "historical_sl_already_hit"
 
-            if high >= final_tp:
-                return True, f"historical_{FINAL_TP_KEY}_already_hit"
+            if high >= release_tp:
+                return True, f"historical_{RELEASE_TARGET_KEY}_already_hit_slot_released"
 
         else:
             if high >= stop_loss:
                 return True, "historical_sl_already_hit"
 
-            if low <= final_tp:
-                return True, f"historical_{FINAL_TP_KEY}_already_hit"
+            if low <= release_tp:
+                return True, f"historical_{RELEASE_TARGET_KEY}_already_hit_slot_released"
 
     return False, ""
 
@@ -3316,6 +3450,8 @@ def active_message_text(structure, candles):
             f"TP1: <b>{plan['tp1']}</b> | RR {plan['rr_tp1']}",
             f"TP2: <b>{plan['tp2']}</b> | RR {plan['rr_tp2']}",
             f"TP3: <b>{plan['tp3']}</b> | RR {plan['rr_tp3']}",
+            "",
+            "Lifecycle: <b>TP1 or SL releases this slot</b>",
             "",
             f"Entry zone: {plan['entry_zone_low']} - {plan['entry_zone_high']}",
             "",
@@ -3914,401 +4050,123 @@ def send_cancel_notifications(structure, reason):
 # ============================================================
 
 def monitor_trade_alerts(pair, timeframe, candles):
-    """
-    1. Process Telegram TP/SL for all rows with trade_state=ACTIVE.
-    2. Audit all ACTIVE structures that have no Telegram row and
-       close them if TP3 or SL has been hit. This ensures the
-       engine frees the slot even when no Telegram user is registered.
-    """
+    """V9.2: SL or TP1 closes monitoring and frees the structure slot."""
     pair = canonical_symbol(pair)
     timeframe = str(timeframe).upper()
-
-    # ----------------------------------------------------------
-    # Step 1 — Telegram plan TP/SL processing
-    # ----------------------------------------------------------
     with DB_LOCK:
         connection = db()
-
         try:
             cursor = connection.cursor()
             cursor.execute(
-                """
-                SELECT *
-                FROM telegram_trade_alerts
-                WHERE pair=%s
-                AND timeframe=%s
-                AND trade_state='ACTIVE'
-                """,
+                """SELECT * FROM telegram_trade_alerts
+                   WHERE pair=%s AND timeframe=%s AND trade_state='ACTIVE'""",
                 (pair, timeframe),
             )
             rows = cursor.fetchall()
             cursor.close()
-
-        except Exception:
-            connection.rollback()
-            raise
-
         finally:
             connection.close()
-
     total_events = 0
-    closed_structure_keys = set()
-
+    closed_keys = set()
+    closed_reasons = {}
     for row in rows:
         if not row["plan_json"]:
             continue
-
         try:
             plan = json.loads(row["plan_json"])
         except Exception:
             continue
-
         entry_epoch = int(plan.get("entry_epoch", 0))
-
-        if entry_epoch <= 0:
-            continue
-
         direction = plan.get("direction")
-
-        if direction not in ("BULLISH", "BEARISH"):
+        if entry_epoch <= 0 or direction not in ("BULLISH", "BEARISH"):
             continue
-
-        events = []
-        close_trade = False
-
+        event = None
         for candle in candles:
             candle_epoch = int(candle["epoch"])
-
             if candle_epoch <= entry_epoch:
                 continue
-
             high = float(candle["high"])
             low = float(candle["low"])
-
-            if direction == "BULLISH":
-                # SL first — conservative.
-                if (
-                    not plan.get("sl_hit")
-                    and low <= float(plan["stop_loss"])
-                ):
-                    plan["sl_hit"] = True
-                    plan["trade_state"] = "SL_HIT"
-                    events.append(
-                        ("SL", plan["stop_loss"], candle_epoch)
-                    )
-                    close_trade = True
-                    break
-
-                if (
-                    not plan.get("tp1_hit")
-                    and high >= float(plan["tp1"])
-                ):
-                    plan["tp1_hit"] = True
-                    events.append(
-                        ("TP1", plan["tp1"], candle_epoch)
-                    )
-
-                    try:
-                        tg_send(
-                            row["chat_id"],
-                            breakeven_message_text(
-                                plan,
-                                plan["tp1"],
-                                candle_epoch,
-                            ),
-                            reply_to_message_id=(
-                                row["active_message_id"] or None
-                            ),
-                        )
-                    except Exception as exc:
-                        print(
-                            "[Telegram] Break-even "
-                            f"message failed: {exc}"
-                        )
-
-                if (
-                    not plan.get("tp2_hit")
-                    and high >= float(plan["tp2"])
-                ):
-                    plan["tp2_hit"] = True
-                    events.append(
-                        ("TP2", plan["tp2"], candle_epoch)
-                    )
-
-                # Final TP (configurable — default is tp2).
-                if (
-                    not plan.get(f"{FINAL_TP_KEY}_hit")
-                    and high >= float(plan[FINAL_TP_KEY])
-                ):
-                    plan[f"{FINAL_TP_KEY}_hit"] = True
-                    plan["trade_state"] = "TP_HIT"
-
-                    events.append(
-                        (
-                            FINAL_TP_KEY.upper(),
-                            plan[FINAL_TP_KEY],
-                            candle_epoch,
-                        )
-                    )
-
-                    close_trade = True
-                    break
-                    events.append(
-                        ("TP3", plan["tp3"], candle_epoch)
-                    )
-                    close_trade = True
-                    break
-
-            else:
-                # BEARISH — SL first.
-                if (
-                    not plan.get("sl_hit")
-                    and high >= float(plan["stop_loss"])
-                ):
-                    plan["sl_hit"] = True
-                    plan["trade_state"] = "SL_HIT"
-                    events.append(
-                        ("SL", plan["stop_loss"], candle_epoch)
-                    )
-                    close_trade = True
-                    break
-
-                if (
-                    not plan.get("tp1_hit")
-                    and low <= float(plan["tp1"])
-                ):
-                    plan["tp1_hit"] = True
-                    events.append(
-                        ("TP1", plan["tp1"], candle_epoch)
-                    )
-
-                    try:
-                        tg_send(
-                            row["chat_id"],
-                            breakeven_message_text(
-                                plan,
-                                plan["tp1"],
-                                candle_epoch,
-                            ),
-                            reply_to_message_id=(
-                                row["active_message_id"] or None
-                            ),
-                        )
-                    except Exception as exc:
-                        print(
-                            "[Telegram] Break-even "
-                            f"message failed: {exc}"
-                        )
-
-                if (
-                    not plan.get("tp2_hit")
-                    and low <= float(plan["tp2"])
-                ):
-                    plan["tp2_hit"] = True
-                    events.append(
-                        ("TP2", plan["tp2"], candle_epoch)
-                    )
-
-                # Final TP (configurable — default is tp2).
-                if (
-                    not plan.get(f"{FINAL_TP_KEY}_hit")
-                    and low <= float(plan[FINAL_TP_KEY])
-                ):
-                    plan[f"{FINAL_TP_KEY}_hit"] = True
-                    plan["trade_state"] = "TP_HIT"
-
-                    events.append(
-                        (
-                            FINAL_TP_KEY.upper(),
-                            plan[FINAL_TP_KEY],
-                            candle_epoch,
-                        )
-                    )
-
-                    close_trade = True
-                    break
-                    events.append(
-                        ("TP3", plan["tp3"], candle_epoch)
-                    )
-                    close_trade = True
-                    break
-
-        if not events:
+            sl_hit = (
+                low <= float(plan["stop_loss"])
+                if direction == "BULLISH"
+                else high >= float(plan["stop_loss"])
+            )
+            tp1_hit = (
+                high >= float(plan["tp1"])
+                if direction == "BULLISH"
+                else low <= float(plan["tp1"])
+            )
+            # Conservative same-candle ordering.
+            if sl_hit:
+                plan["sl_hit"] = True
+                plan["trade_state"] = "SL_HIT"
+                event = ("SL", plan["stop_loss"], candle_epoch)
+                break
+            if RELEASE_AT_TP1 and tp1_hit:
+                plan["tp1_hit"] = True
+                plan["trade_state"] = "CLOSED"
+                event = ("TP1", plan["tp1"], candle_epoch)
+                break
+        if event is None:
             continue
-
-        active_message_id = row["active_message_id"] or None
-
-        for event, price, candle_epoch in events:
-            ok, _message_id, detail = tg_send(
-                row["chat_id"],
-                trade_event_text(
-                    plan,
-                    event,
-                    price,
-                    candle_epoch,
-                ),
-                reply_to_message_id=active_message_id,
-            )
-
-            if ok:
-                total_events += 1
-            else:
-                print(
-                    f"[Telegram] Trade event failed: {detail}"
-                )
-
-        if close_trade:
-            plan["trade_state"] = (
-                "CLOSED"
-                if plan.get(f"{FINAL_TP_KEY}_hit")
-                else "SL_HIT"
-            )
-
-            closed_structure_keys.add(row["structure_key"])
-
+        event_name, price, candle_epoch = event
+        ok, _message_id, detail = tg_send(
+            row["chat_id"],
+            trade_event_text(plan, event_name, price, candle_epoch),
+            reply_to_message_id=row["active_message_id"] or None,
+        )
+        if ok:
+            total_events += 1
+        else:
+            print(f"[Telegram] Trade event failed: {detail}")
         with DB_LOCK:
             connection = db()
-
             try:
                 cursor = connection.cursor()
                 cursor.execute(
-                    """
-                    UPDATE telegram_trade_alerts
-                    SET plan_json=%s,
-                        trade_state=%s,
-                        last_event=%s,
-                        updated_epoch=%s
-                    WHERE id=%s
-                    """,
+                    """UPDATE telegram_trade_alerts
+                       SET plan_json=%s, trade_state=%s, last_event=%s,
+                           updated_epoch=%s WHERE id=%s""",
                     (
-                        json.dumps(
-                            plan,
-                            separators=(",", ":"),
-                        ),
-                        plan.get("trade_state", "ACTIVE"),
-                        events[-1][0],
+                        json.dumps(plan, separators=(",", ":")),
+                        plan["trade_state"],
+                        event_name,
                         int(time.time()),
                         row["id"],
                     ),
                 )
                 connection.commit()
                 cursor.close()
-
-            except Exception:
-                connection.rollback()
-                raise
-
             finally:
                 connection.close()
-
-    # Delete closed structures after all users are processed.
-    for structure_key_value in closed_structure_keys:
+        closed_keys.add(row["structure_key"])
+        closed_reasons[row["structure_key"]] = (
+            "tp1_hit_slot_released"
+            if event_name == "TP1"
+            else "sl_hit_slot_released"
+        )
+    for structure_key_value in closed_keys:
+        reason = closed_reasons[structure_key_value]
         try:
-            delete_structure_by_key(structure_key_value)
+            close_structure_by_key(structure_key_value, reason)
         except Exception as exc:
-            print(
-                f"[Scanner] delete_structure_by_key error: {exc}"
-            )
-
-    # ----------------------------------------------------------
-    # Step 2 — Structural audit
-    #
-    # Find all ACTIVE structures for this pair/timeframe that
-    # have no Telegram row. These were never tracked by
-    # monitor_trade_alerts but still need TP/SL enforcement.
-    # Without this, structures with no registered Telegram users
-    # stay ACTIVE forever even after TP3 or SL is hit.
-    # ----------------------------------------------------------
-    active_structures = structures_for(pair, timeframe)
-
-    for structure in active_structures:
+            print(f"[Scanner] close_structure_by_key error: {exc}")
+    # Structural audit also uses trade_already_finished(), now TP1/SL based.
+    for structure in structures_for(pair, timeframe):
         if structure.get("stage") != "ACTIVE":
             continue
-
-        skey = structure_key(structure)
-
-        # Skip structures that already had Telegram processing above.
-        if skey in closed_structure_keys:
+        key = structure_key(structure)
+        if key in closed_keys:
             continue
-
-        if not structure.get("entry_epoch"):
-            continue
-
-        if not structure.get("entry_price"):
-            continue
-
-        try:
-            finished, finish_reason = trade_already_finished(
-                structure,
-                candles,
-            )
-        except Exception as exc:
-            print(
-                f"[Scanner] Structural audit "
-                f"trade_already_finished error: {exc}"
-            )
-            continue
-
+        finished, reason = trade_already_finished(structure, candles)
         if not finished:
             continue
-
-        print(
-            f"[Scanner] Structural audit closing "
-            f"{pair} {timeframe}: {finish_reason}"
-        )
-
-        trade_state = (
-            "CLOSED"
-            if "tp" in finish_reason.lower()
-            else "SL_HIT"
-        )
-
-        try:
-            close_trade_alerts_for_structure(
-                skey,
-                trade_state,
-                finish_reason,
-            )
-        except Exception as exc:
-            print(
-                f"[Scanner] close_trade_alerts error "
-                f"in structural audit: {exc}"
-            )
-
-        mark_invalid(structure, finish_reason)
-
-        # Notify only if the plan was live, then remove the row.
-        live_from = int(
-            structure.get("live_from_epoch", 0) or 0
-        )
-        entry_epoch = int(
-            structure.get("entry_epoch", 0) or 0
-        )
-
-        if entry_epoch > live_from:
-            try:
-                send_cancel_notifications(
-                    structure,
-                    finish_reason,
-                )
-            except Exception as exc:
-                print(
-                    f"[Scanner] send_cancel_notifications "
-                    f"error in structural audit: {exc}"
-                )
-
-        try:
-            delete_structure_by_key(skey)
-        except Exception as exc:
-            print(
-                f"[Scanner] delete_structure_by_key error "
-                f"in structural audit: {exc}"
-            )
-
+        trade_state = "CLOSED" if "tp1" in reason.lower() else "SL_HIT"
+        close_trade_alerts_for_structure(key, trade_state, reason)
+        close_structure_by_key(key, reason)
         total_events += 1
-
     return total_events
-
 # ============================================================
 # NOTIFICATION PROCESSING
 # ============================================================
@@ -5660,7 +5518,7 @@ def health_api():
     return jsonify(
         {
             "ok": True,
-            "engine": "TradeSignal Structure Scanner V9",
+            "engine": "TradeSignal Structure Scanner V9.2 TP1 Release",
             "server_time_utc": datetime.now(timezone.utc).strftime(
                 "%Y-%m-%d %H:%M:%S UTC"
             ),
@@ -5686,6 +5544,8 @@ def health_api():
             ),
             "scanner_interval_seconds": config["interval"],
             "g_min_reach": G_MIN_REACH,
+            "release_at_tp1": RELEASE_AT_TP1,
+            "release_target": RELEASE_TARGET_KEY,
             "targets": targets,
         }
     )
